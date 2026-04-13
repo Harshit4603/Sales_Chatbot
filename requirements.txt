@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+pydantic
+sqlalchemy
+langchain-community
+langchain-huggingface
+sentence-transformers
+chromadb
+streamlit
+python-dotenv
+requests
+numpy
+psycopg2-binary
+duckduckgo-search
+gunicorn

@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Sensitive data
+.env
+
+# Vector Database (Local data)
+# chroma_db/  # Uncomment if you want to exclude your local vector DB
+
+# VS Code / IDEs
+.vscode/
+
+# Project-specific exclusions (from root)
+DB website/
+DB without website/
+DB_Sample/
+Query/
+Sample/
+# Sample doc/
+# sample_img.jpg
+Document/
