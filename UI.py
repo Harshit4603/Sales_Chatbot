@@ -7,7 +7,7 @@ import datetime
 # =========================
 # CONFIGURATION
 # =========================
-API_URL     = "http://127.0.0.1:8000"   # Your FastAPI URL
+API_URL     = "https://web-production-498498.up.railway.app"   # Your FastAPI URL
 EMPLOYEE_ID = "EMP001"                   # Replace with real login later
 
 # ── helpers ──────────────────────────────────────────────────────────────────
