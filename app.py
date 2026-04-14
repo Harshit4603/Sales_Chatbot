@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 from groq import Groq
+import requests
 
 from database import get_db
 from models import ChatSession, ChatMessage, get_ist
@@ -17,6 +18,19 @@ from models import ChatSession, ChatMessage, get_ist
 # CONFIGURATION
 # =========================
 load_dotenv()
+HF_API_KEY = os.getenv("HF_API_KEY")
+
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-base-en-v1.5"
+
+HF_HEADERS = {
+    "Authorization": f"Bearer {HF_API_KEY}"
+}
+
+from pinecone import Pinecone
+
+# Initialize Pinecone (add this near top with config)
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index("sales-chatbot")  # your index name
 
 app = FastAPI()
 
@@ -83,29 +97,66 @@ def build_memory_block(session_id: str, db: Session) -> str:
     print(f"[*] Memory loaded: {len(past_messages)} previous turn(s)")
     return memory_block
 
+def get_embedding(text):
+    response = requests.post(
+        HF_API_URL,
+        headers=HF_HEADERS,
+        json={"inputs": text}
+    )
+
+    result = response.json()
+
+    # Handle nested output
+    if isinstance(result[0][0], list):
+        return result[0][0]
+    return result[0]
+
 # =========================
 # CORE PIPELINE
 # =========================
 def process_query(user_query, memory_block: str = ""):
-    # Build final prompt with memory injected
+    
+    # 🔹 Step 1: Convert query to embedding
+    query_embedding = get_embedding(user_query)
+
+    # 🔹 Step 2: Search Pinecone
+    results = index.query(
+        vector=query_embedding,
+        top_k=5,
+        include_metadata=True
+    )
+
+    # 🔹 Step 3: Extract context
+    context_chunks = []
+    for match in results["matches"]:
+        context_chunks.append(match["metadata"]["text"])
+
+    context = "\n\n".join(context_chunks)
+
+    # 🔹 Step 4: Build prompt
     memory_section = ""
     if memory_block:
         memory_section = f"""
 --- CONVERSATION HISTORY ---
 {memory_block}
-(Use this history to understand follow-up questions. If the user references
-"it", "that", "the one you mentioned" etc., resolve them using the history above.)
 ----------------------------
 """
 
     final_prompt = f"""
 {memory_section}
+
+Context:
+{context}
+
 User Question: {user_query}
 Answer:
 """
+
+    # 🔹 Step 5: Call LLM
     answer = query_llm(final_prompt)
-    sources = {"db_sources": [], "internet_sources": []}
-    return answer, sources
+
+    return answer, {"db_sources": context_chunks, "internet_sources": []}
+
 
 # =========================
 # REQUEST MODELS
