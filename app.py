@@ -38,7 +38,7 @@ def query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.7):
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful retail store assistant. Answer questions concisely and professionally."},
+                {"role": "system", "content": "You are a helpful retail store assistant. Answer questions concisely and professionally. IMPORTANT: Return ONLY the plain text answer. Do NOT include any HTML, CSS, or UI tags in your response."},
                 {"role": "user", "content": prompt}
             ],
             temperature=temperature
