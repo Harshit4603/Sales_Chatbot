@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 from database import get_db
-from models import ChatSession, ChatMessage
+from models import ChatSession, ChatMessage, get_ist
 
 # =========================
 # CONFIGURATION
@@ -159,7 +159,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         answer      = answer,
     )
     db.add(message)
-    session.last_active_at = datetime.utcnow()
+    session.last_active_at = get_ist()
     db.commit()
     db.refresh(message)
 
