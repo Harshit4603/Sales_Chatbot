@@ -127,7 +127,7 @@ else:
 
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                response = process_query(prompt)
-            st.markdown(response)
+                answer, sources = process_query(prompt)
+            st.markdown(answer)
 
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        st.session_state.messages.append({"role": "assistant", "content": answer})
