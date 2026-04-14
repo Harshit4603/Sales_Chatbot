@@ -7,7 +7,7 @@ import datetime
 # =========================
 # CONFIGURATION
 # =========================
-API_URL     = "https://web-production-498498.up.railway.app"   # Your FastAPI URL
+BACKEND_URL = "https://web-production-498498.up.railway.app"   # Your FastAPI URL
 EMPLOYEE_ID = "EMP001"                   # Replace with real login later
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ def get_base64_of_bin_file(bin_file):
 def init_backend():
     """Warm up backend by hitting the root endpoint."""
     try:
-        requests.get(f"{API_URL}/", timeout=5)
+        requests.get(f"{BACKEND_URL}/", timeout=5)
     except Exception:
         pass
 
@@ -38,7 +38,7 @@ def send_message(query: str) -> dict:
         "session_id" : st.session_state.get("session_id")  # None on first message
     }
     try:
-        response = requests.post(f"{API_URL}/chat", json=payload, timeout=None)
+        response = requests.post(f"{BACKEND_URL}/chat", json=payload, timeout=None)
         response.raise_for_status()
         data = response.json()
 
@@ -57,7 +57,7 @@ def rate_message(message_id: str, rating: str):
         return
     try:
         requests.patch(
-            f"{API_URL}/chat/{message_id}/rate",
+            f"{BACKEND_URL}/chat/{message_id}/rate",
             json={"rating": rating},
             timeout=10
         )
