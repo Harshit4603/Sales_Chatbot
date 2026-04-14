@@ -7,7 +7,7 @@ import datetime
 # =========================
 # CONFIGURATION
 # =========================
-BACKEND_URL = "https://web-production-498498.up.railway.app"   # Your FastAPI URL
+BACKEND_URL = "https://sales-chatbot-7wsa.onrender.com"   # Your FastAPI URL
 EMPLOYEE_ID = "EMP001"                   # Replace with real login later
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -382,17 +382,17 @@ if st.session_state.initialized:
                 sources_html += '</div>'
 
             st.markdown(f"""
-            <div class="msg-row-bot">
-                <div class="bot-mini-avatar">◈</div>
-                <div class="bubble-bot-wrap">
-                    <div class="bubble-bot">{content}</div>
-                    {sources_html}
-                    <div class="bubble-meta">
-                        <span class="bubble-time">{ts}</span>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+<div class="msg-row-bot">
+<div class="bot-mini-avatar">◈</div>
+<div class="bubble-bot-wrap">
+<div class="bubble-bot">{content}</div>
+{sources_html}
+<div class="bubble-meta">
+<span class="bubble-time">{ts}</span>
+</div>
+</div>
+</div>
+""", unsafe_allow_html=True)
 
             # Rating buttons
             col_gap, col_up, col_dn, col_rest = st.columns([6, 0.45, 0.45, 3])
