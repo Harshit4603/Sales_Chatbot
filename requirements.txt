@@ -1,8 +1,9 @@
+numpy
 fastapi
 uvicorn
-python-dotenv
 groq
-requests
 sqlalchemy
+python-dotenv
+requests
+pinecone-client
 psycopg2-binary
-numpy
