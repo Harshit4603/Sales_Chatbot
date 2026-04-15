@@ -111,12 +111,25 @@ def get_embedding(text):
     )
 
     result = response.json()
+    print(f"[*] HF response type: {type(result)}")
+    print(f"[*] HF response first element type: {type(result[0])}")
 
-    # Handle nested output
-    if isinstance(result[0][0], list):
+    # ✅ Handle all 3 possible response shapes
+    if isinstance(result, list) and isinstance(result[0], float):
+        # Shape: [0.01, 0.04, ...] → flat list directly
+        print(f"[*] Embedding shape: flat list, dim={len(result)}")
+        return result
+    elif isinstance(result, list) and isinstance(result[0], list) and isinstance(result[0][0], float):
+        # Shape: [[0.01, 0.04, ...]] → single nested list
+        print(f"[*] Embedding shape: nested list, dim={len(result[0])}")
+        return result[0]
+    elif isinstance(result, list) and isinstance(result[0], list) and isinstance(result[0][0], list):
+        # Shape: [[[0.01, 0.04, ...]]] → double nested list
+        print(f"[*] Embedding shape: double nested list, dim={len(result[0][0])}")
         return result[0][0]
-    return result[0]
-
+    else:
+        print(f"[!] Unknown embedding format: {str(result)[:200]}")
+        raise ValueError("Unexpected embedding response format from HuggingFace")
 # =========================
 # CORE PIPELINE
 # =========================
