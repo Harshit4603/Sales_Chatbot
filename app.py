@@ -152,36 +152,43 @@ def get_embedding(text):
         print(f"[!] Unknown embedding format: {str(result)[:200]}")
         raise ValueError("Unexpected embedding response format from HuggingFace")
     
+# --- Update your search_web function in app.py ---
 def search_web(query: str) -> list:
-    """Use any web search API — SerpAPI, Tavily, etc."""
-    # Example with Tavily (pip install tavily-python)
     from tavily import TavilyClient
     tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
     results = tavily.search(query=query, max_results=3)
-    return [r["content"] for r in results.get("results", [])]
+    
+    # FIX: Return a list of dicts instead of strings
+    formatted_results = []
+    for r in results.get("results", []):
+        formatted_results.append({
+            "title": r.get("title", "Web Source"),
+            "url": r.get("url", "#"),
+            "content": r.get("content", "")
+        })
+    return formatted_results
 
+# --- Update retrieve_and_answer to always return 3 items ---
 def retrieve_and_answer(user_query: str, route: str, memory_block: str = ""):
     context_chunks = []
     sources = {"db_sources": [], "internet_sources": []}
 
-    # DB retrieval
     if route in ["db", "both"]:
         embedding = get_embedding(user_query)
         results = index.query(vector=embedding, top_k=5, include_metadata=True)
         db_chunks = [m["metadata"]["text"] for m in results["matches"] if m["metadata"].get("text")]
-        print(f"[Retrieval] DB chunks: {len(db_chunks)}, scores: {[round(m['score'],3) for m in results['matches']]}")
         context_chunks.extend(db_chunks)
         sources["db_sources"] = db_chunks
 
-    # Web retrieval
     if route in ["web", "both"]:
-        web_chunks = search_web(user_query)
-        print(f"[Retrieval] Web chunks: {len(web_chunks)}")
-        context_chunks.extend(web_chunks)
-        sources["internet_sources"] = web_chunks
+        web_results = search_web(user_query)
+        # Add only content to context, but keep full dicts for sources
+        context_chunks.extend([r["content"] for r in web_results])
+        sources["internet_sources"] = web_results
 
     if not context_chunks:
-        return "I don't have enough information to answer that.", sources
+        # FIX: Always return 3 items (answer, sources, context_chunks)
+        return "I don't have enough information to answer that.", sources, []
 
     context = "\n\n".join(context_chunks)
     memory_section = f"--- CONVERSATION HISTORY ---\n{memory_block}\n----------------------------\n" if memory_block else ""
