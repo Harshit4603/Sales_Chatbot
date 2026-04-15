@@ -47,22 +47,28 @@ MEMORY_TURNS = 1
 # =========================
 # LLM INTERACTION
 # =========================
-def query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.7):
+def query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.2):
     try:
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful retail store assistant. Answer questions concisely and professionally. IMPORTANT: Return ONLY the plain text answer. Do NOT include any HTML, CSS, or UI tags in your response."},
+                {"role": "system", "content": (
+                    "You are a retail store assistant. "
+                    "Answer ONLY using the context provided under 'Context:'. "
+                    "If the context does not contain enough information to answer, "
+                    "say: 'I don't have that information in my database.' "
+                    "Do NOT use your general knowledge. "
+                    "Return plain text only — no HTML, CSS, or markdown."
+                )},
                 {"role": "user", "content": prompt}
             ],
             temperature=temperature
         )
         return response.choices[0].message.content.strip()
-
     except Exception as e:
         print(f"LLM Error: {e}")
         return "Error connecting to LLM."
-
+    
 # =========================
 # CONVERSATION MEMORY BUILDER
 # =========================
@@ -115,24 +121,28 @@ def get_embedding(text):
 # CORE PIPELINE
 # =========================
 def process_query(user_query, memory_block: str = ""):
-    
-    # 🔹 Step 1: Convert query to embedding
     query_embedding = get_embedding(user_query)
 
-    # 🔹 Step 2: Search Pinecone
     results = index.query(
         vector=query_embedding,
         top_k=5,
         include_metadata=True
     )
 
-    # 🔹 Step 3: Extract context
-    context_chunks = []
-    for match in results["matches"]:
-        context_chunks.append(match["metadata"]["text"])
+    # ✅ Add this debug block
+    print(f"[*] Pinecone matches found: {len(results['matches'])}")
+    for i, match in enumerate(results["matches"]):
+        print(f"  [{i}] score={match['score']:.4f} | text={match['metadata'].get('text', '')[:80]}")
 
+    context_chunks = [m["metadata"]["text"] for m in results["matches"]]
     context = "\n\n".join(context_chunks)
 
+    # ✅ Warn if context is empty
+    if not context.strip():
+        print("[!] WARNING: No context retrieved from Pinecone!")
+        return "I don't have that information in my database.", {"db_sources": [], "internet_sources": []}
+    
+    
     # 🔹 Step 4: Build prompt
     memory_section = ""
     if memory_block:
@@ -142,21 +152,17 @@ def process_query(user_query, memory_block: str = ""):
 ----------------------------
 """
 
-    final_prompt = f"""
+    final_prompt = f"""Use ONLY the following context to answer the question. Do not use outside knowledge.
+
 {memory_section}
 
-Context:
+--- CONTEXT FROM INTERNAL DATABASE ---
 {context}
+--------------------------------------
 
 User Question: {user_query}
-Answer:
-"""
 
-    # 🔹 Step 5: Call LLM
-    answer = query_llm(final_prompt)
-
-    return answer, {"db_sources": context_chunks, "internet_sources": []}
-
+Answer (based only on the context above):"""
 
 # =========================
 # REQUEST MODELS
