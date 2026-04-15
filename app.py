@@ -121,28 +121,47 @@ def get_embedding(text):
 # CORE PIPELINE
 # =========================
 def process_query(user_query, memory_block: str = ""):
+    
+    # 🔹 Step 1: Convert query to embedding
     query_embedding = get_embedding(user_query)
+    print(f"[*] Embedding dimension: {len(query_embedding)}")
 
+    # 🔹 Step 2: Search Pinecone
     results = index.query(
         vector=query_embedding,
         top_k=5,
         include_metadata=True
     )
 
-    # ✅ Add this debug block
-    print(f"[*] Pinecone matches found: {len(results['matches'])}")
-    for i, match in enumerate(results["matches"]):
-        print(f"  [{i}] score={match['score']:.4f} | text={match['metadata'].get('text', '')[:80]}")
+    # ✅ Debug: How many matches returned
+    matches = results["matches"]
+    print(f"[*] Pinecone matches returned: {len(matches)}")
 
-    context_chunks = [m["metadata"]["text"] for m in results["matches"]]
+    if not matches:
+        print("[!] WARNING: No matches found in Pinecone!")
+        return "I don't have that information in my database.", {"db_sources": [], "internet_sources": []}
+
+    # ✅ Debug: Print each match score and preview
+    for i, match in enumerate(matches):
+        score = match.get("score", "N/A")
+        text_preview = match["metadata"].get("text", "")[:100]
+        print(f"  [{i+1}] Score: {score:.4f} | Text preview: {text_preview}...")
+
+    # 🔹 Step 3: Extract context
+    context_chunks = []
+    for match in matches:
+        text = match["metadata"].get("text", "").strip()
+        if text:
+            context_chunks.append(text)
+
+    print(f"[*] Non-empty context chunks: {len(context_chunks)}")
+
+    if not context_chunks:
+        print("[!] WARNING: Matches found but all have empty text metadata!")
+        return "I don't have that information in my database.", {"db_sources": [], "internet_sources": []}
+
     context = "\n\n".join(context_chunks)
 
-    # ✅ Warn if context is empty
-    if not context.strip():
-        print("[!] WARNING: No context retrieved from Pinecone!")
-        return "I don't have that information in my database.", {"db_sources": [], "internet_sources": []}
-    
-    
     # 🔹 Step 4: Build prompt
     memory_section = ""
     if memory_block:
@@ -163,6 +182,13 @@ def process_query(user_query, memory_block: str = ""):
 User Question: {user_query}
 
 Answer (based only on the context above):"""
+
+    # 🔹 Step 5: Call LLM
+    print(f"[*] Sending prompt to LLM...")
+    answer = query_llm(final_prompt)
+    print(f"[*] LLM Response: {answer[:100]}...")
+
+    return answer, {"db_sources": context_chunks, "internet_sources": []}
 
 # =========================
 # REQUEST MODELS
