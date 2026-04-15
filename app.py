@@ -44,6 +44,28 @@ client = Groq(api_key=GROQ_API_KEY)
 # How many previous Q&A pairs to include as memory
 MEMORY_TURNS = 1
 
+def route_query(user_query: str) -> str:
+    """Returns: 'db', 'web', or 'both'"""
+    prompt = f"""You are a query router for a retail store assistant.
+Classify where to retrieve the answer from:
+
+- "db"  → product info, prices, stock, store policies, internal data
+- "web" → current news, real-time prices, external market info
+- "both" → needs both internal and external data
+
+Query: {user_query}
+
+Reply with ONLY one word: db, web, or both."""
+
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    decision = response.choices[0].message.content.strip().lower()
+    print(f"[Router] Decision: {decision}")
+    return decision if decision in ["db", "web", "both"] else "db"
+
 # =========================
 # LLM INTERACTION
 # =========================
@@ -54,10 +76,9 @@ def query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.2):
             messages=[
                 {"role": "system", "content": (
                     "You are a retail store assistant. "
-                    "Answer ONLY using the context provided under 'Context:'. "
-                    "If the context does not contain enough information to answer, "
-                    "say: 'I don't have that information in my database.' "
-                    "Do NOT use your general knowledge. "
+                    "Answer using the context provided under 'Context:'. "
+                    "If the context does not contain enough information to answer, go to internet and search The sleep company website"
+                    "Do NOT use your general knowledge."
                     "Return plain text only — no HTML, CSS, or markdown."
                 )},
                 {"role": "user", "content": prompt}
@@ -130,78 +151,120 @@ def get_embedding(text):
     else:
         print(f"[!] Unknown embedding format: {str(result)[:200]}")
         raise ValueError("Unexpected embedding response format from HuggingFace")
+    
+def search_web(query: str) -> list:
+    """Use any web search API — SerpAPI, Tavily, etc."""
+    # Example with Tavily (pip install tavily-python)
+    from tavily import TavilyClient
+    tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+    results = tavily.search(query=query, max_results=3)
+    return [r["content"] for r in results.get("results", [])]
+
+def retrieve_and_answer(user_query: str, route: str, memory_block: str = ""):
+    context_chunks = []
+    sources = {"db_sources": [], "internet_sources": []}
+
+    # DB retrieval
+    if route in ["db", "both"]:
+        embedding = get_embedding(user_query)
+        results = index.query(vector=embedding, top_k=5, include_metadata=True)
+        db_chunks = [m["metadata"]["text"] for m in results["matches"] if m["metadata"].get("text")]
+        print(f"[Retrieval] DB chunks: {len(db_chunks)}, scores: {[round(m['score'],3) for m in results['matches']]}")
+        context_chunks.extend(db_chunks)
+        sources["db_sources"] = db_chunks
+
+    # Web retrieval
+    if route in ["web", "both"]:
+        web_chunks = search_web(user_query)
+        print(f"[Retrieval] Web chunks: {len(web_chunks)}")
+        context_chunks.extend(web_chunks)
+        sources["internet_sources"] = web_chunks
+
+    if not context_chunks:
+        return "I don't have enough information to answer that.", sources
+
+    context = "\n\n".join(context_chunks)
+    memory_section = f"--- CONVERSATION HISTORY ---\n{memory_block}\n----------------------------\n" if memory_block else ""
+
+    prompt = f"""{memory_section}
+Use ONLY the following context to answer. Do not use outside knowledge.
+
+--- CONTEXT ---
+{context}
+---------------
+
+Question: {user_query}
+Answer:"""
+
+    answer = query_llm(prompt)
+    return answer, sources, context_chunks
+
+def validate_answer(user_query: str, answer: str, context_chunks: list) -> dict:
+    """Returns: {'valid': bool, 'feedback': str}"""
+    context = "\n\n".join(context_chunks)
+
+    prompt = f"""You are a strict answer validator for a retail store assistant.
+
+Check the answer against the context for:
+1. Factual accuracy — does it match the context?
+2. Math correctness — if numbers are involved, are calculations right?
+3. Completeness — does it fully address the question?
+
+Context:
+{context}
+
+Question: {user_query}
+Answer: {answer}
+
+Reply in this exact format:
+VALID: yes or no
+FEEDBACK: one sentence explaining why (or what's wrong)"""
+
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+
+    result = response.choices[0].message.content.strip()
+    valid = "VALID: yes" in result.lower()
+    feedback = result.split("FEEDBACK:")[-1].strip() if "FEEDBACK:" in result else ""
+    print(f"[Validator] Valid: {valid} | Feedback: {feedback}")
+    return {"valid": valid, "feedback": feedback}
+
+
 # =========================
 # CORE PIPELINE
 # =========================
-def process_query(user_query, memory_block: str = ""):
-    
-    # 🔹 Step 1: Convert query to embedding
-    query_embedding = get_embedding(user_query)
-    print(f"[*] Embedding dimension: {len(query_embedding)}")
+MAX_RETRIES = 2
 
-    # 🔹 Step 2: Search Pinecone
-    results = index.query(
-        vector=query_embedding,
-        top_k=5,
-        include_metadata=True
-    )
+def process_query(user_query: str, memory_block: str = ""):
+    route = route_query(user_query)
 
-    # ✅ Debug: How many matches returned
-    matches = results["matches"]
-    print(f"[*] Pinecone matches returned: {len(matches)}")
+    for attempt in range(MAX_RETRIES):
+        retry_hint = ""
+        if attempt > 0:
+            retry_hint = f"\n\nPrevious attempt was rejected. Fix this issue: {last_feedback}"
+            print(f"[Retry] Attempt {attempt + 1}, feedback: {last_feedback}")
 
-    if not matches:
-        print("[!] WARNING: No matches found in Pinecone!")
-        return "I don't have that information in my database.", {"db_sources": [], "internet_sources": []}
+        answer, sources, context_chunks = retrieve_and_answer(
+            user_query + retry_hint, route, memory_block
+        )
 
-    # ✅ Debug: Print each match score and preview
-    for i, match in enumerate(matches):
-        score = match.get("score", "N/A")
-        text_preview = match["metadata"].get("text", "")[:100]
-        print(f"  [{i+1}] Score: {score:.4f} | Text preview: {text_preview}...")
+        if not context_chunks:
+            return answer, sources
 
-    # 🔹 Step 3: Extract context
-    context_chunks = []
-    for match in matches:
-        text = match["metadata"].get("text", "").strip()
-        if text:
-            context_chunks.append(text)
+        validation = validate_answer(user_query, answer, context_chunks)
 
-    print(f"[*] Non-empty context chunks: {len(context_chunks)}")
+        if validation["valid"]:
+            print(f"[Pipeline] Answer passed validation on attempt {attempt + 1}")
+            return answer, sources
 
-    if not context_chunks:
-        print("[!] WARNING: Matches found but all have empty text metadata!")
-        return "I don't have that information in my database.", {"db_sources": [], "internet_sources": []}
+        last_feedback = validation["feedback"]
 
-    context = "\n\n".join(context_chunks)
-
-    # 🔹 Step 4: Build prompt
-    memory_section = ""
-    if memory_block:
-        memory_section = f"""
---- CONVERSATION HISTORY ---
-{memory_block}
-----------------------------
-"""
-
-    final_prompt = f"""Use ONLY the following context to answer the question. Do not use outside knowledge.
-
-{memory_section}
-
---- CONTEXT FROM INTERNAL DATABASE ---
-{context}
---------------------------------------
-
-User Question: {user_query}
-
-Answer (based only on the context above):"""
-
-    # 🔹 Step 5: Call LLM
-    print(f"[*] Sending prompt to LLM...")
-    answer = query_llm(final_prompt)
-    print(f"[*] LLM Response: {answer[:100]}...")
-
-    return answer, {"db_sources": context_chunks, "internet_sources": []}
+    # Return best effort after retries
+    print("[Pipeline] Max retries reached, returning last answer")
+    return answer, sources
 
 # =========================
 # REQUEST MODELS
