@@ -5,5 +5,5 @@ groq
 sqlalchemy
 python-dotenv
 requests
-pinecone-client
+pinecone
 psycopg2-binary
