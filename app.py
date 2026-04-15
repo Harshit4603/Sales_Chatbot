@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 from groq import Groq
 import requests
+import json
 
 from database import get_db
 from models import ChatSession, ChatMessage, get_ist
@@ -240,7 +241,30 @@ FEEDBACK: one sentence explaining why (or what's wrong)"""
     print(f"[Validator] Valid: {valid} | Feedback: {feedback}")
     return {"valid": valid, "feedback": feedback}
 
+def generate_followups(user_query: str, answer: str) -> list[str]:
+    prompt = f"""You are a retail store assistant. Based on the conversation below, suggest 3 short follow-up questions the user might want to ask next.
 
+Question: {user_query}
+Answer: {answer}
+
+Rules:
+- Each suggestion must be under 10 words
+- Make them specific to the topic discussed
+- Return ONLY a JSON array of 3 strings, nothing else
+Example: ["What are the return policy details?", "Do you offer EMI options?", "Is this available in other colors?"]"""
+
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4
+        )
+        raw = response.choices[0].message.content.strip()
+        suggestions = json.loads(raw)
+        return suggestions if isinstance(suggestions, list) else []
+    except Exception as e:
+        print(f"[Followups] Error: {e}")
+        return []
 # =========================
 # CORE PIPELINE
 # =========================
@@ -330,12 +354,16 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(message)
 
+    # After: answer, sources = process_query(...)
+    followups = generate_followups(request.query, answer)   # ← add this
+
     return {
         "session_id"      : str(session.session_id),
         "message_id"      : str(message.message_id),
         "answer"          : answer,
         "db_sources"      : sources["db_sources"],
         "internet_sources": sources["internet_sources"],
+        "followups"       : followups,                      # ← add this
     }
 
 @app.patch("/chat/{message_id}/rate")
