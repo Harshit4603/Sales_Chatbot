@@ -209,6 +209,7 @@ Check the answer against the context for:
 1. Factual accuracy — does it match the context?
 2. Math correctness — if numbers are involved, are calculations right?
 3. Completeness — does it fully address the question?
+4. Check if the question needs any information from the user that is missing (e.g. which product, needs, etc.)
 
 Context:
 {context}
