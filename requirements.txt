@@ -7,3 +7,4 @@ python-dotenv
 requests
 pinecone
 psycopg2-binary
+tavily-python
