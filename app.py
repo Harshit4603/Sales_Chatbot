@@ -87,7 +87,7 @@ def query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.2):
             model=model,
             messages=[
                 {"role": "system", "content": (
-                    "You are a retail store assistant. "
+                    "You are a helpful retail store assistant Chatbot. "
                     "Answer using the context provided under 'Context:'. "
                     "If the context does not contain enough information to answer, go to internet and search The sleep company website"
                     "Do NOT use your general knowledge."
