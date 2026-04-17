@@ -19,6 +19,9 @@ from models import Employee  # make sure Employee model exists
 # =========================
 # CONFIGURATION
 # =========================
+
+SOURCES_ACCESSED = 10  # how many retrieved chunks to include in LLM context (DB + Web combined)
+
 load_dotenv()
 HF_API_KEY = os.getenv("HF_API_KEY")
 
@@ -193,7 +196,7 @@ def retrieve_and_answer(user_query: str, route: str, memory_block: str = ""):
 
     if route in ["db", "both"]:
         embedding = get_embedding(user_query)
-        results = index.query(vector=embedding, top_k=5, include_metadata=True)
+        results = index.query(vector=embedding, top_k=SOURCES_ACCESSED, include_metadata=True)
         db_chunks = [m["metadata"]["text"] for m in results["matches"] if m["metadata"].get("text")]
         context_chunks.extend(db_chunks)
         sources["db_sources"] = db_chunks
