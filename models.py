@@ -8,6 +8,16 @@ import uuid
 def get_ist():
     return datetime.utcnow() + timedelta(hours=5, minutes=30)
 
+class Employee(Base):
+    __tablename__ = "employees"
+
+    employee_id   = Column(String(50), primary_key=True)
+    name          = Column(String(100), nullable=False)
+    email         = Column(String(100), unique=True, nullable=False)
+    password_hash = Column(Text, nullable=False)
+    role          = Column(String(10), nullable=False)
+    created_at    = Column(DateTime, default=get_ist)
+
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
 
