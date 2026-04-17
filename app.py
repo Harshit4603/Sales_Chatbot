@@ -58,22 +58,27 @@ MEMORY_TURNS = 1
 
 def route_query(user_query: str) -> str:
     """Returns: 'db', 'web', or 'both'"""
-    prompt = f"""You are a query router for a retail store assistant.
-Classify where to retrieve the answer from:
+    prompt = f"""You are a query classifier for a retail store assistant.
 
-- "db"  → product info, prices, stock, store policies, internal data
-- "web" → current news, real-time prices, external market info
-- "both" → needs both internal and external data
+Classify the query into exactly one category:
 
-Query: {user_query}
+db   = product catalog, pricing, stock levels, store hours, policies, order history
+web  = competitor prices, news, real-time market data, external brand info  
+both = requires internal product data AND external/current information
 
-Reply with ONLY one word: db, web, or both."""
+Rules:
+- If in doubt, choose "db"
+- Output ONLY the single word: db, web, or both
+- No punctuation, no explanation
+
+Query: {user_query}"""
 
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
-    )
+    model="llama-3.1-8b-instant",
+    messages=[{"role": "user", "content": prompt}],
+    temperature=0,
+    max_tokens=5  # hard cap
+)
     decision = response.choices[0].message.content.strip().lower()
     print(f"[Router] Decision: {decision}")
     return decision if decision in ["db", "web", "both"] else "db"
@@ -87,11 +92,11 @@ def query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.2):
             model=model,
             messages=[
                 {"role": "system", "content": (
-                    "You are a helpful retail store assistant Chatbot. "
+                    "You are a retail store assistant Chatbot. "
                     "Answer using the context provided under 'Context:'. "
-                    "If the context does not contain enough information to answer, go to internet and search The sleep company website"
                     "Do NOT use your general knowledge."
                     "Return plain text only — no HTML, CSS, or markdown."
+                    "Use a friendly and professional tone."
                 )},
                 {"role": "user", "content": prompt}
             ],
@@ -165,7 +170,7 @@ def get_embedding(text):
         raise ValueError("Unexpected embedding response format from HuggingFace")
     
 # --- Update your search_web function in app.py ---
-def search_web(query: str) -> list:
+def search_web(query: str, max_chars_per_result=800) -> list:
     from tavily import TavilyClient
     tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
     results = tavily.search(query=query, max_results=3)
@@ -176,8 +181,9 @@ def search_web(query: str) -> list:
         formatted_results.append({
             "title": r.get("title", "Web Source"),
             "url": r.get("url", "#"),
-            "content": r.get("content", "")
+            "content": r.get("content", "")[:max_chars_per_result]  # hard cap
         })
+
     return formatted_results
 
 # --- Update retrieve_and_answer to always return 3 items ---
@@ -222,23 +228,18 @@ def validate_answer(user_query: str, answer: str, context_chunks: list) -> dict:
     """Returns: {'valid': bool, 'feedback': str}"""
     context = "\n\n".join(context_chunks)
 
-    prompt = f"""You are a strict answer validator for a retail store assistant.
+    prompt = f"""Validate this retail assistant answer. Reply ONLY:
+VALID: yes
+FEEDBACK: <one sentence>
 
-Check the answer against the context for:
-1. Factual accuracy — does it match the context?
-2. Math correctness — if numbers are involved, are calculations right?
-3. Completeness — does it fully address the question?
-4. Check if the question needs any information from the user that is missing (e.g. which product, needs, etc.)
+OR
 
-Context:
-{context}
+VALID: no  
+FEEDBACK: <specific problem>
 
+Context: {context[:1500]}  ← cap this too
 Question: {user_query}
-Answer: {answer}
-
-Reply in this exact format:
-VALID: yes or no
-FEEDBACK: one sentence explaining why (or what's wrong)"""
+Answer: {answer}"""
 
     response = client.chat.completions.create(
         model="llama-3.1-8b-instant",
