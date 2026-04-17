@@ -94,7 +94,7 @@ Query: {user_query}"""
 # =========================
 # LLM INTERACTION
 # =========================
-def query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.2):
+def query_llm(prompt, model="llama-3.1-70b-instant", temperature=0.2):
     try:
         response = client.chat.completions.create(
             model=model,
