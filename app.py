@@ -11,9 +11,10 @@ from dotenv import load_dotenv
 from groq import Groq
 import requests
 import json
-
+from pydantic import BaseModel
 from database import get_db
 from models import ChatSession, ChatMessage, get_ist
+from models import Employee  # make sure Employee model exists
 
 # =========================
 # CONFIGURATION
@@ -305,6 +306,7 @@ class ChatRequest(BaseModel):
     employee_id: str
     session_id: str | None = None
     query: str
+    role: str | None = None  # add this
 
 class RatingRequest(BaseModel):
     rating: str  # "thumbs_up" or "thumbs_down"
@@ -316,6 +318,26 @@ class RatingRequest(BaseModel):
 @app.get("/")
 def root():
     return {"status": "Store Assistant API is running"}
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+@app.post("/login")
+def login(request: LoginRequest, db: Session = Depends(get_db)):
+    employee = db.query(Employee).filter(Employee.email == request.email).first()
+    
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    if employee.password_hash != request.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return {
+        "employee_id": employee.employee_id,
+        "name": employee.name,
+        "role": employee.role
+    }
 
 @app.post("/chat")
 def chat(request: ChatRequest, db: Session = Depends(get_db)):
