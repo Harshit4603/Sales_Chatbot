@@ -2,7 +2,6 @@
 # LIGHTWEIGHT APP.PY: FASTAPI + GROQ + SUPABASE LOGGING
 # =============================================================================
 import os
-from urllib import response
 import uuid
 from datetime import datetime
 from fastapi import FastAPI, Depends, HTTPException
@@ -87,12 +86,10 @@ Query: {user_query}"""
     temperature=0,
     max_tokens=5  # hard cap
 )
-    response = client.chat.completions.create(...)
-    log_usage(response, "Router")
     decision = response.choices[0].message.content.strip().lower()
     print(f"[Router] Decision: {decision}")
     return decision if decision in ["db", "web", "both"] else "db"
-
+    
 
 # =========================
 # LLM INTERACTION
@@ -113,8 +110,6 @@ def query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.2):
             ],
             temperature=temperature
         )
-        response = client.chat.completions.create(...)
-        log_usage(response, "Main LLM")
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"LLM Error: {e}")
@@ -264,8 +259,6 @@ Answer: {answer}"""
     valid = "VALID: yes" in result.lower()
     feedback = result.split("FEEDBACK:")[-1].strip() if "FEEDBACK:" in result else ""
     print(f"[Validator] Valid: {valid} | Feedback: {feedback}")
-    response = client.chat.completions.create(...)
-    log_usage(response, "Validator")
     return {"valid": valid, "feedback": feedback}
 
 def generate_followups(user_query: str, answer: str) -> list[str]:
