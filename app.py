@@ -24,8 +24,8 @@ SOURCES_ACCESSED     = 10      # top_k chunks pulled from Pinecone per query
 MEMORY_TURNS         = 3      # how many past Q&A pairs to include in the LLM prompt
 MAX_RETRIES          = 2      # validation retry attempts before returning best effort
 DB_STRONG_THRESHOLD  = 5      # min DB chunks needed to skip web search
-SCORE_THRESHOLD      = 0.50   # min Pinecone score to count a chunk as "strong"
-WEB_SCORE_THRESHOLD  = 0.70   # min Tavily score to keep a web result
+SCORE_THRESHOLD      = 0.20   # min Pinecone score to count a chunk as "strong"
+WEB_SCORE_THRESHOLD  = 0.60   # min Tavily score to keep a web result
 MAX_WEB_RESULTS      = 2      # cap on injected web results
 
 # =============================================================================
