@@ -391,115 +391,130 @@ def retrieve_from_db(
 # STEP 6 — GEMINI WEB SEARCH (Enhanced for Product Queries)
 # Strongly encourages fetching fresh product info from the official website.
 # =============================================================================
+import time
+import random
+
+# =============================================================================
+# STEP 6 — GEMINI WEB SEARCH (Robust Version with Retry + Strong Product Focus)
+# =============================================================================
 def search_with_gemini(
     user_query: str,
     db_context: str = "",
 ) -> dict:
     """
     Uses Gemini with Google Search grounding.
-    Enhanced for product-related questions.
+    Includes retry on 503 errors + graceful fallback to Groq.
+    Optimized for product queries (colors, specs, etc.).
     """
     system_prompt = (
-        "You are an internal assistant for 'The Sleep Company', helping sales "
+        "You are a helpful internal assistant for 'The Sleep Company', supporting sales "
         "representatives and employees.\n\n"
-        "Your job:\n"
-        "1. Prioritise the internal company context provided as the PRIMARY source.\n"
-        "2. For ANY product-related question (colors, variants, price, warranty, dimensions, "
-        "availability, recommendations, etc.), ALWAYS use Google Search to get the latest "
-        "information directly from https://thesleepcompany.in.\n"
-        "3. Clearly distinguish: 'From internal documents:' vs 'From our website:'\n"
-        "4. Be professional, concise, and use bullet points.\n"
-        "5. Never invent product names, prices, colors, or specs.\n"
-        "6. Never portray The Sleep Company negatively.\n"
-        "7. If the user asks about colors, variants, or options of a product, list them clearly.\n"
+        "Rules:\n"
+        "1. Always prioritize the internal company context if provided.\n"
+        "2. For product questions (colors, variants, price, warranty, dimensions, recommendations, "
+        "'best sofa', etc.), actively use Google Search to fetch the **latest accurate information** "
+        "from the official website: https://thesleepcompany.in\n"
+        "3. Clearly separate sources: Use 'From internal documents:' and 'From our website:' when needed.\n"
+        "4. Be professional, concise, and use bullet points for lists (especially colors).\n"
+        "5. Never invent or hallucinate product details, prices, or colors.\n"
+        "6. Never speak negatively about The Sleep Company.\n"
     )
 
     # Build user message
     if db_context.strip():
         user_message = (
-            f"Internal company context (use this as PRIMARY source):\n"
+            f"Internal company context (PRIMARY source):\n"
             f"---\n{db_context[:4000]}\n---\n\n"
             f"User question: {user_query}\n\n"
-            f"Answer using the internal context first. "
-            f"If the required product details (especially colors, variants, price, or specs) "
-            f"are missing or incomplete in the context, use Google Search to fetch the latest "
-            f"information from the official website thesleepcompany.in."
+            f"Answer using internal context first. "
+            f"If details like colors, variants, or specs are missing/incomplete, "
+            f"use Google Search to get the latest information directly from thesleepcompany.in."
         )
     else:
         user_message = (
             f"User question: {user_query}\n\n"
-            f"This is a product-related query. Use Google Search to get accurate, "
+            f"This is likely a product query. Use Google Search to provide accurate, "
             f"up-to-date information from https://thesleepcompany.in."
         )
 
-    try:
-        # Enable Google Search grounding
-        grounding_tool = types.Tool(
-            google_search=types.GoogleSearch()
-        )
-
-        config = types.GenerateContentConfig(
-            tools=[grounding_tool],
-            temperature=0.1,          # Lower temperature for factual product answers
-            max_output_tokens=1200,
-            system_instruction=system_prompt,
-        )
-
-        response = genai_client.models.generate_content(
-            model="gemini-2.5-flash",     # Fast and good for this use case
-            contents=user_message,
-            config=config,
-        )
-
-        answer = response.text.strip() if response.text else ""
-
-        # Extract grounding sources (best quality)
-        web_sources = []
+    max_retries = 5
+    for attempt in range(max_retries):
         try:
-            if response.candidates and len(response.candidates) > 0:
-                candidate = response.candidates[0]
-                if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
-                    for chunk in getattr(candidate.grounding_metadata, 'grounding_chunks', []) or []:
-                        if hasattr(chunk, 'web') and chunk.web:
-                            web_sources.append({
-                                "title": getattr(chunk.web, 'title', 'The Sleep Company'),
-                                "url": getattr(chunk.web, 'uri', '')
-                            })
-        except Exception as src_err:
-            print(f"[Gemini Sources] Extraction error: {src_err}")
+            grounding_tool = types.Tool(google_search=types.GoogleSearch())
 
-        # Fallback URL extraction
-        if not web_sources:
-            import re
-            url_pattern = re.compile(r'https?://[^\s\)\"\']+')
-            urls_found = url_pattern.findall(answer)
-            for url in urls_found[:6]:
-                if "thesleepcompany.in" in url:
-                    web_sources.append({"title": "The Sleep Company Website", "url": url})
-
-        print(f"[Gemini Search] Answer length={len(answer)} | Sources={len(web_sources)}")
-        return {"answer": answer, "web_sources": web_sources}
-
-    except Exception as e:
-        print(f"[Gemini Search] Failed: {e}")
-        # Fallback without grounding
-        try:
-            fallback_config = types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=1000,
+            config = types.GenerateContentConfig(
+                tools=[grounding_tool],
+                temperature=0.1,          # Low for factual product answers
+                max_output_tokens=1200,
                 system_instruction=system_prompt,
             )
-            fallback_response = genai_client.models.generate_content(
+
+            response = genai_client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=user_message,
-                config=fallback_config,
+                config=config,
             )
-            return {
-                "answer": fallback_response.text.strip() if fallback_response.text else "",
-                "web_sources": []
-            }
-        except:
-            return {"answer": "I'm unable to fetch the information right now. Please check our website or contact the team.", "web_sources": []}
+
+            answer = response.text.strip() if response.text else ""
+
+            # Extract grounding sources
+            web_sources = []
+            try:
+                if response.candidates and len(response.candidates) > 0:
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
+                        for chunk in getattr(candidate.grounding_metadata, 'grounding_chunks', []) or []:
+                            if hasattr(chunk, 'web') and chunk.web:
+                                web_sources.append({
+                                    "title": getattr(chunk.web, 'title', 'The Sleep Company'),
+                                    "url": getattr(chunk.web, 'uri', '')
+                                })
+            except Exception:
+                pass
+
+            # Fallback: extract official website URLs from answer
+            if not web_sources:
+                import re
+                url_pattern = re.compile(r'https?://[^\s\)\"\']+')
+                urls_found = url_pattern.findall(answer)
+                for url in urls_found[:6]:
+                    if "thesleepcompany.in" in url.lower():
+                        web_sources.append({"title": "The Sleep Company Website", "url": url})
+
+            print(f"[Gemini Search] Success on attempt {attempt+1} | Sources={len(web_sources)}")
+            return {"answer": answer, "web_sources": web_sources}
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(x in error_str for x in ["503", "high demand", "unavailable", "overloaded"]):
+                wait = (2 ** attempt) + random.uniform(0.5, 2.0)
+                print(f"[Gemini Search] 503 High Demand - retrying in {wait:.1f}s (attempt {attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            else:
+                print(f"[Gemini Search] Non-retryable error: {e}")
+                break
+
+    # Final fallback when all Gemini attempts fail
+    print("[Gemini Search] All retries failed → falling back to Groq LLM")
+    try:
+        fallback_prompt = f"""You are a helpful assistant for The Sleep Company.
+Answer this product-related question as accurately as possible.
+If you don't have exact details, politely direct the user to check the official website.
+
+Question: {user_query}"""
+
+        fallback_answer = query_llm(fallback_prompt, model="llama-3.3-70b-versatile", temperature=0.2)
+        
+        return {
+            "answer": fallback_answer + "\n\n(Note: Our search service is temporarily busy. Please verify the latest details on https://thesleepcompany.in)",
+            "web_sources": []
+        }
+    except Exception:
+        return {
+            "answer": "I'm currently experiencing high load on our search service. Please try again in a moment or visit https://thesleepcompany.in for the latest product information.",
+            "web_sources": []
+        }
 
 # =============================================================================
 # STEP 7 — CONTEXT BUILDER
