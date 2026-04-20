@@ -27,7 +27,7 @@ MEMORY_TURNS        = 5      # how many past Q&A pairs to include in the LLM pro
                              # increased from 3 — better conversational coherence
 DB_STRONG_THRESHOLD = 5      # min strong DB chunks needed to skip web search
                              # increased from 3 — avoids premature web fallback
-SCORE_THRESHOLD     = 0.45   # min Pinecone score to count a chunk as "strong"
+SCORE_THRESHOLD     = 0.25   # min Pinecone score to count a chunk as "strong"
                              # lowered from 0.60 — bge-base scores cluster 0.45–0.65
 
 # =============================================================================
@@ -89,6 +89,35 @@ class LoginRequest(BaseModel):
     email:    str
     password: str
 
+
+# =============================================================================
+# HELPER: Detect Product Queries
+# =============================================================================
+def is_product_query(parsed: dict, user_query: str) -> bool:
+    """Return True if this should go to website (Gemini)"""
+    query_type = parsed.get("query_type", "")
+    doc_category = parsed.get("doc_category", "general")
+    topic = parsed.get("topic", "").lower()
+    q = user_query.lower()
+
+    # Strong signals
+    product_keywords = [
+        "sofa", "mattress", "pillow", "recliner", "bed", "chair", "valencia",
+        "color", "colour", "colors", "colours", "shade", "option", "variant",
+        "available in", "how many", "price", "warranty", "dimension", "size",
+        "recommend", "best", "which", "catalog"
+    ]
+
+    if query_type == "retrieval" and doc_category == "product":
+        return True
+
+    if any(keyword in q for keyword in product_keywords):
+        return True
+
+    if "valencia" in q or "product" in doc_category:
+        return True
+
+    return False
 
 # =============================================================================
 # STEP 1 — QUERY PARSER
@@ -358,42 +387,50 @@ def retrieve_from_db(
 # Uses Gemini's native Grounding with Google Search tool.
 # Prioritises internal DB context and uses web search only when needed.
 # =============================================================================
+# =============================================================================
+# STEP 6 — GEMINI WEB SEARCH (Enhanced for Product Queries)
+# Strongly encourages fetching fresh product info from the official website.
+# =============================================================================
 def search_with_gemini(
     user_query: str,
     db_context: str = "",
 ) -> dict:
     """
     Uses Gemini with Google Search grounding.
-    Returns:
-        {
-            "answer": str,
-            "web_sources": list of dicts [{"title": ..., "url": ...}]
-        }
+    Enhanced for product-related questions.
     """
     system_prompt = (
         "You are an internal assistant for 'The Sleep Company', helping sales "
         "representatives and employees.\n\n"
         "Your job:\n"
-        "1. Prioritise the internal company context provided (if any) as the PRIMARY source.\n"
-        "2. Use Google Search ONLY to fill gaps (sleep science, competitor comparisons, "
-        "material standards, certifications, current events, etc.).\n"
-        "3. Clearly distinguish what comes from internal documents vs web sources.\n"
-        "4. Be professional, concise, and use bullet points when helpful.\n"
-        "5. Never make up product names, prices, specs, or company policies.\n"
+        "1. Prioritise the internal company context provided as the PRIMARY source.\n"
+        "2. For ANY product-related question (colors, variants, price, warranty, dimensions, "
+        "availability, recommendations, etc.), ALWAYS use Google Search to get the latest "
+        "information directly from https://thesleepcompany.in.\n"
+        "3. Clearly distinguish: 'From internal documents:' vs 'From our website:'\n"
+        "4. Be professional, concise, and use bullet points.\n"
+        "5. Never invent product names, prices, colors, or specs.\n"
         "6. Never portray The Sleep Company negatively.\n"
+        "7. If the user asks about colors, variants, or options of a product, list them clearly.\n"
     )
 
-    # Build user message with internal context
+    # Build user message
     if db_context.strip():
         user_message = (
-            f"Internal company context (use this as the PRIMARY source):\n"
+            f"Internal company context (use this as PRIMARY source):\n"
             f"---\n{db_context[:4000]}\n---\n\n"
             f"User question: {user_query}\n\n"
-            f"Answer mainly using the internal context above. "
-            f"Use web search only if the internal information is missing or outdated."
+            f"Answer using the internal context first. "
+            f"If the required product details (especially colors, variants, price, or specs) "
+            f"are missing or incomplete in the context, use Google Search to fetch the latest "
+            f"information from the official website thesleepcompany.in."
         )
     else:
-        user_message = user_query
+        user_message = (
+            f"User question: {user_query}\n\n"
+            f"This is a product-related query. Use Google Search to get accurate, "
+            f"up-to-date information from https://thesleepcompany.in."
+        )
 
     try:
         # Enable Google Search grounding
@@ -403,14 +440,13 @@ def search_with_gemini(
 
         config = types.GenerateContentConfig(
             tools=[grounding_tool],
-            temperature=0.2,
-            max_output_tokens=1024,
+            temperature=0.1,          # Lower temperature for factual product answers
+            max_output_tokens=1200,
             system_instruction=system_prompt,
         )
 
         response = genai_client.models.generate_content(
-            model="gemini-2.5-flash",          # Fast & generous free tier
-            # model="gemini-3-flash-preview",  # Stronger reasoning (if needed)
+            model="gemini-2.5-flash",     # Fast and good for this use case
             contents=user_message,
             config=config,
         )
@@ -426,30 +462,31 @@ def search_with_gemini(
                     for chunk in getattr(candidate.grounding_metadata, 'grounding_chunks', []) or []:
                         if hasattr(chunk, 'web') and chunk.web:
                             web_sources.append({
-                                "title": getattr(chunk.web, 'title', 'Web source'),
+                                "title": getattr(chunk.web, 'title', 'The Sleep Company'),
                                 "url": getattr(chunk.web, 'uri', '')
                             })
         except Exception as src_err:
             print(f"[Gemini Sources] Extraction error: {src_err}")
 
-        # Fallback: extract URLs from text if no metadata
+        # Fallback URL extraction
         if not web_sources:
             import re
             url_pattern = re.compile(r'https?://[^\s\)\"\']+')
             urls_found = url_pattern.findall(answer)
-            for url in urls_found[:5]:
-                web_sources.append({"title": "Web source", "url": url})
+            for url in urls_found[:6]:
+                if "thesleepcompany.in" in url:
+                    web_sources.append({"title": "The Sleep Company Website", "url": url})
 
         print(f"[Gemini Search] Answer length={len(answer)} | Sources={len(web_sources)}")
         return {"answer": answer, "web_sources": web_sources}
 
     except Exception as e:
         print(f"[Gemini Search] Failed: {e}")
-        # Optional: fallback to non-grounded generation
+        # Fallback without grounding
         try:
             fallback_config = types.GenerateContentConfig(
                 temperature=0.2,
-                max_output_tokens=800,
+                max_output_tokens=1000,
                 system_instruction=system_prompt,
             )
             fallback_response = genai_client.models.generate_content(
@@ -462,7 +499,7 @@ def search_with_gemini(
                 "web_sources": []
             }
         except:
-            return {"answer": "", "web_sources": []}
+            return {"answer": "I'm unable to fetch the information right now. Please check our website or contact the team.", "web_sources": []}
 
 # =============================================================================
 # STEP 7 — CONTEXT BUILDER
@@ -612,93 +649,101 @@ Example: ["What is the warranty period?", "Is it available in white?", "What's t
 #     → Fallback message if Claude also fails
 # =============================================================================
 
+# =============================================================================
+# STEP 10 — RETRIEVE AND ANSWER (Updated for Product Queries)
+# =============================================================================
 def retrieve_and_answer(
-    user_query:   str,
-    parsed:       dict,
+    user_query: str,
+    parsed: dict,
     memory_block: str = "",
-    role:         str | None = None,
+    role: str | None = None,
 ) -> tuple[str, dict]:
     """
     Returns (answer, sources_dict)
-    sources_dict = { "db_sources": [...], "web_sources": [...] }
     """
-
     doc_category = parsed["doc_category"]
-    topic        = parsed["topic"]
+    topic = parsed["topic"]
 
-    # Rewrite query to resolve follow-up references before hitting Pinecone
+    # Rewrite query for better retrieval
     retrieval_query = rewrite_query(user_query, memory_block)
 
-    # --- Always query DB first ---
-    db_chunks     = retrieve_from_db(retrieval_query, doc_category, topic, role=role)
+    # --- Always query DB first (for context) ---
+    db_chunks = retrieve_from_db(retrieval_query, doc_category, topic, role=role)
     strong_chunks = [c for c in db_chunks if c.get("_score", 0.0) >= SCORE_THRESHOLD]
+
     print(f"[Pipeline] {len(strong_chunks)} strong chunks (threshold={SCORE_THRESHOLD})")
 
-    # -----------------------------------------------------------------------
-    # PATH A — DB is strong enough → answer with Groq, no web search
-    # -----------------------------------------------------------------------
+    # ===================================================================
+    # NEW LOGIC: PRODUCT QUERIES → ALWAYS GO TO WEBSITE (Gemini)
+    # ===================================================================
+    if is_product_query(parsed, user_query):
+        print(f"[Pipeline] Product query detected → forcing Gemini with web search")
+        db_context = build_context(db_chunks) if db_chunks else ""
+        
+        result = search_with_gemini(user_query, db_context=db_context)
+        
+        if result["answer"]:
+            sources = {
+                "db_sources": [c.get("text", "") for c in db_chunks],
+                "web_sources": result["web_sources"],
+            }
+            return result["answer"], sources
+        else:
+            # Fallback
+            return (
+                "I don't have enough information right now. Please check our website or contact the team.",
+                {"db_sources": [], "web_sources": []}
+            )
+
+    # ===================================================================
+    # NON-PRODUCT QUERIES → Keep original logic (DB strong → Groq)
+    # ===================================================================
     if len(strong_chunks) >= DB_STRONG_THRESHOLD:
         print("[Pipeline] Path A — DB strong, answering with Groq")
-
         context = build_context(db_chunks)
-
         memory_section = (
             f"--- CONVERSATION HISTORY ---\n{memory_block}\n----------------------------\n"
             if memory_block else ""
         )
-
         prompt = f"""{memory_section}Use ONLY the following context to answer the question.
 The context may include product information, company policies, SOPs, or training material.
 If the answer is not present, say so clearly.
-
 --- CONTEXT ---
 {context}
 ---------------
-
 Question: {user_query}
 Answer:"""
-
-        answer  = query_llm(prompt)
+        answer = query_llm(prompt)
         sources = {
-            "db_sources":  [c.get("text", "") for c in db_chunks],
+            "db_sources": [c.get("text", "") for c in db_chunks],
             "web_sources": [],
         }
         return answer, sources
 
-    # -----------------------------------------------------------------------
-    # PATH B — DB weak → hand off to Claude with web search
-    # Claude receives whatever DB context we have so it can cross-reference.
-    # -----------------------------------------------------------------------
+    # Path B — DB weak but some context available
     elif db_chunks:
-        print("[Pipeline] Path B — DB weak, handing to Claude with web search")
-
+        print("[Pipeline] Path B — DB weak, handing to Gemini with web search")
         db_context = build_context(db_chunks)
-        result = search_with_gemini(user_query, db_context=db_context)   # ← changed from search_with_claude to search_with_gemini
-
+        result = search_with_gemini(user_query, db_context=db_context)
         if result["answer"]:
             sources = {
-                "db_sources":  [c.get("text", "") for c in db_chunks],
+                "db_sources": [c.get("text", "") for c in db_chunks],
                 "web_sources": result["web_sources"],
             }
             return result["answer"], sources
 
-    # -----------------------------------------------------------------------
-    # PATH C — DB completely empty → pure Claude web search
-    # -----------------------------------------------------------------------
+    # Path C — No DB chunks
     else:
-        print("[Pipeline] Path C — DB empty, pure Claude web search")
-
-        result = search_with_gemini(user_query)   # ← changed from search_with_claude to search_with_gemini
-
+        print("[Pipeline] Path C — DB empty, pure Gemini web search")
+        result = search_with_gemini(user_query)
         if result["answer"]:
             return result["answer"], {"db_sources": [], "web_sources": result["web_sources"]}
 
-    # Final fallback — nothing worked
+    # Final fallback
     return (
         "I don't have enough information to answer that. Please contact the relevant team.",
         {"db_sources": [], "web_sources": []},
     )
-
 
 # =============================================================================
 # STEP 11 — PROCESS QUERY (top-level router)
