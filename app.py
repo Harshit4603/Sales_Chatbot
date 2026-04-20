@@ -640,6 +640,70 @@ def query_llm(prompt: str, model: str = "llama-3.3-70b-versatile", temperature: 
     except Exception as e:
         print(f"[LLM Error] {e}")
         return "I'm facing a temporary issue. Please try again."
+    
+# =============================================================================
+# VALIDATOR — Chooses the best response + gives feedback
+# =============================================================================
+def validate_responses(
+    user_query: str,
+    response_a: str,   # Groq / DB response
+    response_b: str,   # Gemini / Web response
+    db_context: str = ""
+) -> dict:
+    prompt = f"""You are an expert validator for The Sleep Company chatbot.
+
+Compare these TWO answers for the same user query.
+
+User Query: {user_query}
+
+Response A (Internal DB + Groq):
+{response_a}
+
+Response B (Gemini + Web Search):
+{response_b}
+
+Internal Context Available:
+{db_context[:2000] if db_context else "None"}
+
+Evaluate both on these criteria (1-5 scale):
+- Accuracy & Factual Correctness (especially product details)
+- Relevance to the query
+- Use of internal knowledge when available
+- Avoidance of hallucination
+- Helpfulness & Clarity
+- Professional tone
+
+Return ONLY valid JSON:
+{{
+  "winner": "A" or "B" or "tie",
+  "score_a": <int 1-5>,
+  "score_b": <int 1-5>,
+  "reason": "short explanation why you chose this one",
+  "feedback": "specific improvements if any"
+}}
+
+If both are bad (score ≤ 2), set winner to "retry".
+"""
+
+    try:
+        resp = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=300,
+        )
+        raw = resp.choices[0].message.content.strip()
+
+        # Clean JSON if needed
+        if raw.startswith("```json"): raw = raw.split("```json")[1].split("```")[0].strip()
+        elif raw.startswith("```"): raw = raw.split("```")[1].strip()
+
+        result = json.loads(raw)
+        return result
+
+    except Exception as e:
+        print(f"[Validator] Error: {e}")
+        return {"winner": "B", "score_a": 2, "score_b": 4, "reason": "Validator failed, default to Gemini", "feedback": ""}
 
 
 def generate_followups(user_query: str, answer: str) -> list[str]:
@@ -691,128 +755,100 @@ Example: ["What is the warranty period?", "Is it available in white?", "What's t
 # =============================================================================
 # STEP 10 — RETRIEVE AND ANSWER (Updated for Product Queries)
 # =============================================================================
-def retrieve_and_answer(
+# =============================================================================
+# NEW: DUAL PATH + VALIDATOR (for every query)
+# =============================================================================
+def dual_path_with_validation(
     user_query: str,
     parsed: dict,
     memory_block: str = "",
     role: str | None = None,
+    max_retries: int = 1
 ) -> tuple[str, dict]:
-    """
-    Returns (answer, sources_dict)
-    """
+    """Generates two answers → validator picks best → retry once if needed"""
+    
     doc_category = parsed["doc_category"]
     topic = parsed["topic"]
 
-    # Rewrite query for better retrieval
     retrieval_query = rewrite_query(user_query, memory_block)
-
-    # --- Always query DB first (for context) ---
     db_chunks = retrieve_from_db(retrieval_query, doc_category, topic, role=role)
-    strong_chunks = [c for c in db_chunks if c.get("_score", 0.0) >= SCORE_THRESHOLD]
+    db_context = build_context(db_chunks) if db_chunks else ""
 
-    print(f"[Pipeline] {len(strong_chunks)} strong chunks (threshold={SCORE_THRESHOLD})")
+    attempt = 0
+    while attempt <= max_retries:
+        attempt += 1
+        print(f"[DualPath] Attempt {attempt}")
 
-    # ===================================================================
-    # NEW LOGIC: PRODUCT QUERIES → ALWAYS GO TO WEBSITE (Gemini)
-    # ===================================================================
-    if is_product_query(parsed, user_query):
-        print(f"[Pipeline] Product query detected → forcing Gemini with web search")
-        db_context = build_context(db_chunks) if db_chunks else ""
-        
-        result = search_with_gemini(user_query, db_context=db_context)
-        
-        if result["answer"]:
-            sources = {
-                "db_sources": [c.get("text", "") for c in db_chunks],
-                "web_sources": result["web_sources"],
-            }
-            return result["answer"], sources
-        else:
-            # Fallback
-            return (
-                "I don't have enough information right now. Please check our website or contact the team.",
-                {"db_sources": [], "web_sources": []}
-            )
-
-    # ===================================================================
-    # NON-PRODUCT QUERIES → Keep original logic (DB strong → Groq)
-    # ===================================================================
-    if len(strong_chunks) >= DB_STRONG_THRESHOLD:
-        print("[Pipeline] Path A — DB strong, answering with Groq")
-        context = build_context(db_chunks)
-        memory_section = (
-            f"--- CONVERSATION HISTORY ---\n{memory_block}\n----------------------------\n"
-            if memory_block else ""
-        )
-        prompt = f"""{memory_section}Use ONLY the following context to answer the question.
-The context may include product information, company policies, SOPs, or training material.
-If the answer is not present, say so clearly.
+        # === Response A: Groq + DB only ===
+        if db_chunks:
+            context = build_context(db_chunks)
+            memory_section = f"--- CONVERSATION HISTORY ---\n{memory_block}\n---\n" if memory_block else ""
+            prompt_a = f"""{memory_section}Use ONLY the following context to answer.
 --- CONTEXT ---
 {context}
 ---------------
 Question: {user_query}
 Answer:"""
-        answer = query_llm(prompt)
-        sources = {
-            "db_sources": [c.get("text", "") for c in db_chunks],
-            "web_sources": [],
-        }
-        return answer, sources
+            response_a = query_llm(prompt_a)
+        else:
+            response_a = "I don't have internal information for this query."
 
-    # Path B — DB weak but some context available
-    elif db_chunks:
-        print("[Pipeline] Path B — DB weak, handing to Gemini with web search")
-        db_context = build_context(db_chunks)
-        result = search_with_gemini(user_query, db_context=db_context)
-        if result["answer"]:
+        # === Response B: Gemini + Web ===
+        result_b = search_with_gemini(user_query, db_context=db_context)
+        response_b = result_b["answer"] or "I couldn't fetch web information right now."
+
+        # === Validate ===
+        validation = validate_responses(user_query, response_a, response_b, db_context)
+
+        winner = validation.get("winner", "B")
+        print(f"[Validator] Winner: {winner} | Score A:{validation.get('score_a')} B:{validation.get('score_b')}")
+
+        if winner == "retry" and attempt <= max_retries:
+            print("[Validator] Both responses bad → retrying...")
+            continue
+
+        # Choose winner
+        if winner == "A":
+            answer = response_a
+            sources = {"db_sources": [c.get("text", "") for c in db_chunks], "web_sources": []}
+        else:
+            answer = response_b
             sources = {
                 "db_sources": [c.get("text", "") for c in db_chunks],
-                "web_sources": result["web_sources"],
+                "web_sources": result_b.get("web_sources", [])
             }
-            return result["answer"], sources
 
-    # Path C — No DB chunks
-    else:
-        print("[Pipeline] Path C — DB empty, pure Gemini web search")
-        result = search_with_gemini(user_query)
-        if result["answer"]:
-            return result["answer"], {"db_sources": [], "web_sources": result["web_sources"]}
+        # Optional: attach validator feedback in logs
+        print(f"[Validator Feedback] {validation.get('reason')}")
 
-    # Final fallback
+        return answer, sources
+
+    # Final fallback after all retries
     return (
-        "I don't have enough information to answer that. Please contact the relevant team.",
-        {"db_sources": [], "web_sources": []},
+        response_b or "I'm having trouble answering right now. Please check our website or try again.",
+        {"db_sources": [], "web_sources": []}
     )
-
 # =============================================================================
 # STEP 11 — PROCESS QUERY (top-level router)
 # =============================================================================
 
-def process_query(
-    user_query:   str,
-    memory_block: str = "",
-    role:         str | None = None,
-) -> tuple[str, dict]:
-
-    parsed     = parse_query(user_query)
+def process_query(user_query: str, memory_block: str = "", role: str | None = None):
+    parsed = parse_query(user_query)
     query_type = parsed["query_type"]
 
-    # --- Conversational: greetings, capability questions ---
     if query_type == "conversational":
         print("[Pipeline] Conversational — short-circuiting")
-        answer = handle_conversational(user_query)
+        answer = handle_conversational(user_query, memory_block)
         return answer, {"db_sources": [], "web_sources": []}
 
-    # --- Informational: pure general knowledge, no company connection ---
     if query_type == "informational":
-        print("[Pipeline] Informational — LLM only (no retrieval)")
-        prompt = f"Answer this general question concisely and professionally:\n\n{user_query}"
-        answer = query_llm(prompt, model="llama-3.1-8b-instant", temperature=0.3)
+        print("[Pipeline] Informational — LLM only")
+        answer = query_llm(f"Answer concisely:\n{user_query}", model="llama-3.1-8b-instant")
         return answer, {"db_sources": [], "web_sources": []}
 
-    # --- Retrieval: full pipeline ---
-    return retrieve_and_answer(user_query, parsed, memory_block, role=role)
-
+    # === NEW DUAL PATH FOR EVERYTHING ELSE ===
+    print("[Pipeline] Dual Path + Validator activated")
+    return dual_path_with_validation(user_query, parsed, memory_block, role)
 
 # =============================================================================
 # API ENDPOINTS
