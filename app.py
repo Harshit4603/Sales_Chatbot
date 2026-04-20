@@ -243,26 +243,50 @@ Rewritten query:"""
 # Short-circuits for greetings and capability questions.
 # =============================================================================
 
-def handle_conversational(user_query: str) -> str:
-    prompt = f"""You are a helpful assistant for 'The Sleep Company'.
-The user sent a greeting or asked what you can do.
-Respond warmly and professionally in 2–3 sentences.
-Mention you can help with: product info, SOPs, HR policies, training, and pricing.
-Do not make up capabilities you don't have.
+# =============================================================================
+# STEP 3 — CONVERSATIONAL HANDLER (Dynamic & Context-Aware)
+# =============================================================================
+def handle_conversational(user_query: str, memory_block: str = "") -> str:
+    """Handles greetings intelligently by referring back to recent conversation dynamically."""
+    
+    if not memory_block:
+        # Pure greeting - no history
+        prompt = f"""You are a friendly and professional assistant for 'The Sleep Company'.
+User sent a greeting. Respond warmly in 2-3 sentences.
+Mention you can help with product information, recommendations, SOPs, policies, and pricing.
 
 User message: {user_query}"""
 
+    else:
+        # There is recent conversation history → make it contextual
+        prompt = f"""You are a helpful assistant for 'The Sleep Company'.
+
+Recent conversation:
+{memory_block}
+
+User just said: "{user_query}"
+
+Instructions:
+- Greet the user warmly and naturally.
+- If the previous conversation was about products (sofa, recliner, mattress, recommendation, price, colors, etc.), politely refer back to it.
+- Do not repeat the full previous answer. Instead, offer to continue helping on that topic or ask what else they need.
+- Keep the response natural, concise (3-5 sentences max), and professional.
+- Never make up prices, colors, or specs.
+
+Respond directly to the user:"""
+
     try:
         response = groq_client.chat.completions.create(
-            model      = "llama-3.1-8b-instant",
-            messages   = [{"role": "user", "content": prompt}],
-            temperature= 0.5,
-            max_tokens = 150,
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6,
+            max_tokens=180,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[Conversational] Error: {e}")
-        return "Hello! I'm your Sleep Company assistant. I can help with product info, SOPs, policies, and training. What would you like to know?"
+        # Safe generic fallback
+        return "Good morning! 👋 I'm happy to help you today. How can I assist you with our products, policies, or anything else?"
 
 
 # =============================================================================
