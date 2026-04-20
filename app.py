@@ -442,6 +442,12 @@ def search_with_gemini(
         "4. Be professional, concise, and use bullet points for lists (especially colors).\n"
         "5. Never invent or hallucinate product details, prices, or colors.\n"
         "6. Never speak negatively about The Sleep Company.\n"
+
+        "For comparison questions (e.g., 'Valencia vs. Recliner', 'best sofa for back pain'),"
+        "always use Google Search to fetch latest details from thesleepcompany.in. or relevant competitors"
+        "Compare key points: design, comfort (SmartGRID technology), size, features, "
+        "price range, and suitability. Be balanced and helpful. "
+        "Clearly mention sources."
     )
 
     # Build user message
