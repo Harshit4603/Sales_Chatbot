@@ -354,14 +354,42 @@ def query_llm(prompt: str, model: str = "llama-3.1-70b-versatile", temperature: 
                 {
                     "role": "system",
                     "content": (
-                        "You are a helpful company assistant. "
-                        "You answer questions about products, policies, SOPs, and training documents. "
-                        "Answer ONLY using the context provided. Do not use general knowledge. "
-                        "If the answer is not in the context, say: "
-                        "'I don't have that information in my documents. Please contact the relevant team.' "
-                        "Return plain text only — no markdown, no HTML. "
-                        "Be concise, accurate, and professional."
-                    ),
+    "You are an internal company assistant for sales representatives and employees.\n\n"
+
+    "Your role:\n"
+    "- Help with product recommendations\n"
+    "- Answer SOP, policy, and training-related questions\n"
+    "- Assist sales reps in customer conversations\n\n"
+
+    "CRITICAL RULES:\n"
+    "- Use ONLY the provided context\n"
+    "- Do NOT use outside knowledge\n"
+    "- Do NOT hallucinate\n\n"
+
+    "If information is missing:\n"
+    "- Ask a clarifying question if it helps\n"
+    "- OR say: 'I don't have that information in my documents. Please contact the relevant team.'\n\n"
+
+    "QUESTION HANDLING:\n"
+    "1. If query is vague:\n"
+    "- Ask 1–2 clarifying questions OR give guided recommendation\n\n"
+
+    "2. If query is specific:\n"
+    "- Answer directly with exact details\n\n"
+
+    "3. If recommending:\n"
+    "- Suggest relevant products from context\n"
+    "- Explain why briefly\n\n"
+
+    "STYLE:\n"
+    "- Professional\n"
+    "- Concise\n"
+    "- Point-wise\n"
+    "- Plain text only\n\n"
+
+    "COMPANY RULE:\n"
+    "- Never portray company negatively\n"
+),
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -370,23 +398,62 @@ def query_llm(prompt: str, model: str = "llama-3.1-70b-versatile", temperature: 
         return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[LLM Error] {e}")
-        return "Error connecting to LLM."
+        return "I'm facing a temporary issue accessing the knowledge system. Please try again."
 
 
 def validate_answer(user_query: str, answer: str, context: str) -> dict:
-    prompt = f"""Validate this company assistant answer.
-Reply ONLY in this exact format:
+    prompt = f"""
+You are a strict validator for an internal company assistant.
+
+Check:
+
+1. Grounding:
+- Answer must ONLY use given context
+- Any external info = INVALID
+
+2. Relevance:
+- Must directly address question
+
+3. Completeness:
+- Specific query → exact details required
+- General query → recommendation OR clarification
+
+4. Behavior:
+- Vague query → ask clarification or guide
+- Specific query → no unnecessary questions
+
+5. Usefulness:
+- Must help a sales rep or employee
+
+6. Tone:
+- Professional, concise, point-wise
+
+7. Company safety:
+- No negative statements
+
+---
+
+Context:
+{context[:1500]}
+
+Question:
+{user_query}
+
+Answer:
+{answer}
+
+---
+
+Reply ONLY:
+
 VALID: yes
-FEEDBACK: <one sentence>
+FEEDBACK: <reason>
 
 OR
 
 VALID: no
-FEEDBACK: <specific problem and how to fix it>
-
-Context (first 1500 chars): {context[:1500]}
-Question: {user_query}
-Answer: {answer}"""
+FEEDBACK: <issue and fix>
+"""
 
     response = client.chat.completions.create(
         model      = "llama-3.1-8b-instant",
