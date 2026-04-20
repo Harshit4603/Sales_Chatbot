@@ -6,7 +6,7 @@
 # python-dotenv
 # requests
 # pinecone
-# psycopg2-binary
+psycopg2-binary
 # tavily-python
 
 # Core frameworks
