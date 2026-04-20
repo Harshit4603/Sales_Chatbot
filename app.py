@@ -670,21 +670,18 @@ def smart_merge(
     # If Gemini failed, fall back to Groq only if DB was strong.
     print(f"[Merge] Strategy: PRODUCT/GENERAL → Gemini primary")
 
+    # ── PRODUCT / PRICING / FAQ / GENERAL ────────────────────────────────────
     if gemini_answer:
         final = gemini_answer
-    elif groq_answer and strong_count >= DB_STRONG_THRESHOLD:
-        print("[Merge] Gemini empty → falling back to Groq (strong DB)")
-        final = groq_answer
-    elif groq_answer:
-        final = (
-            f"{groq_answer}\n\n"
-            f"_(For the latest details, please visit https://thesleepcompany.in)_"
-        )
     else:
-        final = (
-            "I couldn't find specific information for your query. "
-            "Please visit https://thesleepcompany.in or contact our team."
+        # Gemini returned empty — retry with pure web search, no DB context
+        print("[Merge] Gemini empty → retrying with pure web search")
+        retry = search_with_gemini(user_query, db_context="")
+        final = retry.get("answer") or (
+            "I couldn't retrieve that right now. "
+            "Please visit https://thesleepcompany.in"
         )
+        web_sources = retry.get("web_sources", web_sources)
 
     return final, {"db_sources": db_sources, "web_sources": web_sources}
 
