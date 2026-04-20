@@ -1,132 +1,327 @@
 # =============================================================================
-# LIGHTWEIGHT APP.PY: FASTAPI + GROQ + SUPABASE LOGGING
+# APP.PY — FASTAPI + GROQ + PINECONE + SUPABASE
+# Generic RAG Chatbot Backend
+#
+# Works for any document type: products, SOPs, policies, training manuals.
+# No domain knowledge is hardcoded — the LLM figures out intent at query time.
 # =============================================================================
+
 import os
-import uuid
-from datetime import datetime
+import time
+import json
+import requests
+from dotenv import load_dotenv
+
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from dotenv import load_dotenv
 from groq import Groq
-import requests
-import json
-from pydantic import BaseModel
-from database import get_db
-from models import ChatSession, ChatMessage, get_ist
-from models import Employee  # make sure Employee model exists
-
-# =========================
-# CONFIGURATION
-# =========================
-
-SOURCES_ACCESSED = 10  # how many retrieved chunks to include in LLM context (DB + Web combined)
-
-load_dotenv()
-HF_API_KEY = os.getenv("HF_API_KEY")
-
-HF_API_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-base-en-v1.5"
-
-HF_HEADERS = {
-    "Authorization": f"Bearer {HF_API_KEY}"
-}
-
 from pinecone import Pinecone
 
-# Initialize Pinecone (add this near top with config)
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("sales-chatbot")  # your index name
+from database import get_db
+from models import ChatSession, ChatMessage, Employee, get_ist
+
+load_dotenv()
+
+# =============================================================================
+# CONFIG
+# =============================================================================
+
+SOURCES_ACCESSED = 6    # top_k chunks pulled from Pinecone per query
+MEMORY_TURNS     = 3    # how many past Q&A pairs to include in the LLM prompt
+MAX_RETRIES      = 2    # validation retry attempts before returning best effort
+
+HF_API_KEY = os.getenv("HF_API_KEY")
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-base-en-v1.5"
+HF_HEADERS = {
+    "Authorization": f"Bearer {HF_API_KEY}",
+    "Content-Type":  "application/json",
+}
+
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+PINECONE_INDEX   = "sales-chatbot"
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+print("HF_API_KEY    :", "✅" if HF_API_KEY       else "❌ MISSING")
+print("PINECONE_KEY  :", "✅" if PINECONE_API_KEY  else "❌ MISSING")
+print("GROQ_API_KEY  :", "✅" if GROQ_API_KEY      else "❌ MISSING")
+
+pc     = Pinecone(api_key=PINECONE_API_KEY)
+index  = pc.Index(PINECONE_INDEX)
+client = Groq(api_key=GROQ_API_KEY)
+
+# =============================================================================
+# FASTAPI APP
+# =============================================================================
 
 app = FastAPI()
 
-from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # for now (later restrict to your frontend URL)
+    allow_origins=["*"],   # restrict to your frontend URL in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Groq Client Initialization
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    print("[!] Warning: GROQ_API_KEY not found in environment variables.")
+# =============================================================================
+# PYDANTIC MODELS
+# =============================================================================
 
-client = Groq(api_key=GROQ_API_KEY)
+class ChatRequest(BaseModel):
+    employee_id: str
+    session_id:  str | None = None
+    query:       str
+    role:        str | None = None
 
-def log_usage(response, layer_name):
-    u = response.usage
-    print(f"[{layer_name}] Prompt: {u.prompt_tokens} | Completion: {u.completion_tokens} | Total: {u.total_tokens}")
+class RatingRequest(BaseModel):
+    rating: str   # "thumbs_up" or "thumbs_down"
 
-# How many previous Q&A pairs to include as memory
-MEMORY_TURNS = 2
+class LoginRequest(BaseModel):
+    email:    str
+    password: str
 
-def route_query(user_query: str) -> str:
-    """Returns: 'db', 'web', or 'both'"""
-    prompt = f"""You are a query classifier for a retail store assistant.
 
-Classify the query into exactly one category:
+# =============================================================================
+# STEP 1 — QUERY PARSING  (LLM-based, no hardcoded lists)
+#
+# Instead of keyword-matching against fixed product/section lists,
+# we ask a small fast LLM to extract:
+#   - doc_category : what type of document is this query about?
+#   - topic        : the specific subject within that document
+#   - route        : db / web / both
+#
+# This works for products, SOPs, HR policies, training docs — anything.
+# The LLM does the domain understanding so we don't have to.
+# =============================================================================
 
-db   = product catalog, pricing, stock levels, store hours, policies, order history
-web  = competitor prices, news, real-time market data, external brand info  
-both = requires internal product data AND external/current information
+def parse_query(user_query: str) -> dict:
+    """
+    Uses llama-3.1-8b-instant to extract structured intent from any query.
+    Returns: { doc_category, topic, route }
+
+    doc_category mirrors the infer_doc_category() labels from ingest.py:
+        product / policy / sop / training / pricing / faq / general
+
+    topic is a short free-text subject (e.g. "Valencia warranty",
+    "maternity leave policy", "escalation procedure") used to build
+    the Pinecone filter and embedding prefix.
+
+    route controls retrieval source:
+        db   = search Pinecone (internal documents)
+        web  = search Tavily (external/live web)
+        both = search both
+    """
+    prompt = f"""You are a query classifier for a company assistant chatbot.
+The assistant has access to internal documents including:
+  - Product catalogs and specs
+  - Company SOPs (Standard Operating Procedures)
+  - HR and company policies
+  - Training manuals and guides
+  - Pricing documents
+
+Given the user query below, return ONLY a valid JSON object with these fields:
+
+  "doc_category" : one of ["product", "policy", "sop", "training", "pricing", "faq", "general"]
+  "topic"        : a short phrase (max 6 words) describing the specific subject
+  "route"        : one of ["db", "web", "both"]
+                   db   = answer from internal documents
+                   web  = answer needs current/external web information
+                   both = needs both internal docs and external info
 
 Rules:
-- If in doubt, choose "db"
-- Output ONLY the single word: db, web, or both
-- No punctuation, no explanation
+  - Default doc_category to "general" if unclear
+  - Default route to "db" unless the query clearly needs live/external data
+  - topic should be specific, not generic (e.g. "Valencia sofa warranty" not "warranty")
+  - Return ONLY the JSON object, no explanation, no markdown
 
-Query: {user_query}"""
+User query: {user_query}"""
 
-    response = client.chat.completions.create(
-    model="llama-3.1-8b-instant",
-    messages=[{"role": "user", "content": prompt}],
-    temperature=0,
-    max_tokens=5  # hard cap
-)
-    decision = response.choices[0].message.content.strip().lower()
-    print(f"[Router] Decision: {decision}")
-    return decision if decision in ["db", "web", "both"] else "db"
-    
-
-# =========================
-# LLM INTERACTION
-# =========================
-def query_llm(prompt, model="llama-3.3-70b-versatile", temperature=0.2):
     try:
         response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": (
-                    "You are a retail store assistant Chatbot. "
-                    "Answer using the context provided under 'Context:'. "
-                    "Do NOT use your general knowledge."
-                    "Return plain text only — no HTML, CSS, or markdown."
-                    "Use a friendly and professional tone."
-                )},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=temperature
+            model      = "llama-3.1-8b-instant",
+            messages   = [{"role": "user", "content": prompt}],
+            temperature= 0,
+            max_tokens = 80,
         )
-        return response.choices[0].message.content.strip()
+        raw    = response.choices[0].message.content.strip()
+        parsed = json.loads(raw)
+
+        # Validate and sanitise fields
+        valid_categories = {"product", "policy", "sop", "training", "pricing", "faq", "general"}
+        valid_routes     = {"db", "web", "both"}
+
+        doc_category = parsed.get("doc_category", "general")
+        topic        = parsed.get("topic", "")
+        route        = parsed.get("route", "db")
+
+        if doc_category not in valid_categories: doc_category = "general"
+        if route        not in valid_routes:     route        = "db"
+        if not isinstance(topic, str):           topic        = ""
+
+        print(f"[Parser] category={doc_category} | topic={topic!r} | route={route}")
+        return {"doc_category": doc_category, "topic": topic, "route": route}
+
     except Exception as e:
-        print(f"LLM Error: {e}")
-        return "Error connecting to LLM."
-    
-# =========================
-# CONVERSATION MEMORY BUILDER
-# =========================
+        # Fallback — never crash the pipeline on a parse failure
+        print(f"[Parser] Failed to parse intent ({e}) — using safe defaults")
+        return {"doc_category": "general", "topic": "", "route": "db"}
+
+
+# =============================================================================
+# STEP 2 — EMBEDDING  (with context prefix + retry)
+#
+# The prefix format MUST match build_embed_text() in ingest.py exactly:
+#   "Category: <doc_category>. Heading: <topic/heading>.\n<text>"
+#
+# Matching the ingest prefix means query vectors land in the same
+# region of embedding space as the stored document chunk vectors.
+# =============================================================================
+
+def build_query_embed_text(query: str, doc_category: str, topic: str) -> str:
+    heading_hint = topic if topic else "user query"
+    return (
+        f"Category: {doc_category}. "
+        f"Heading: {heading_hint}.\n"
+        f"{query}"
+    )
+
+
+def get_embedding(text: str) -> list[float]:
+    response = requests.post(HF_API_URL, headers=HF_HEADERS, json={"inputs": text})
+    result   = response.json()
+
+    if isinstance(result, dict):
+        if "error" in result:
+            raise Exception(f"HF API Error: {result['error']}")
+        if "estimated_time" in result:
+            raise Exception("model_loading")
+
+    if isinstance(result, list):
+        if isinstance(result[0], float):        return result
+        if isinstance(result[0], list):
+            if isinstance(result[0][0], float): return result[0]
+            if isinstance(result[0][0], list):  return result[0][0]
+
+    raise ValueError(f"Unexpected HF response: {str(result)[:200]}")
+
+
+def get_embedding_with_retry(text: str, retries: int = 5) -> list[float]:
+    wait = 5
+    for attempt in range(1, retries + 1):
+        try:
+            return get_embedding(text)
+        except Exception as e:
+            msg = str(e).lower()
+            if "model_loading" in msg or "503" in msg or "loading" in msg:
+                print(f"  ⏳ HF model loading — retrying in {wait}s ({attempt}/{retries})")
+                time.sleep(wait)
+                wait = min(wait * 2, 60)
+            else:
+                raise
+    raise Exception(f"Embedding failed after {retries} retries")
+
+
+# =============================================================================
+# STEP 3 — PINECONE RETRIEVAL  (filtered by doc_category, with fallback)
+#
+# We filter on doc_category when the parser is confident — this prevents
+# a product query from pulling policy chunks and vice versa.
+#
+# If the filtered search returns < 2 results (filter too narrow),
+# we automatically retry without the filter so we never return empty.
+# =============================================================================
+
+def retrieve_from_db(
+    user_query:   str,
+    doc_category: str,
+    topic:        str,
+    top_k:        int = SOURCES_ACCESSED,
+) -> list[dict]:
+    embed_text = build_query_embed_text(user_query, doc_category, topic)
+    embedding  = get_embedding_with_retry(embed_text)
+
+    # Only filter on doc_category when we have a specific category
+    pinecone_filter = {}
+    if doc_category and doc_category != "general":
+        pinecone_filter = {"doc_category": {"$eq": doc_category}}
+
+    results = index.query(
+        vector          = embedding,
+        top_k           = top_k,
+        include_metadata= True,
+        filter          = pinecone_filter if pinecone_filter else None,
+    )
+    matches = results.get("matches", [])
+
+    # Fallback: if filtered search returned too few results, go unfiltered
+    if len(matches) < 2 and pinecone_filter:
+        print(f"[Retrieval] Filter '{doc_category}' too narrow — falling back to unfiltered")
+        results = index.query(
+            vector          = embedding,
+            top_k           = top_k,
+            include_metadata= True,
+        )
+        matches = results.get("matches", [])
+
+    valid = [m["metadata"] for m in matches if m["metadata"].get("text")]
+    print(f"[Retrieval] {len(valid)} chunks returned (filter={pinecone_filter or 'none'})")
+    return valid
+
+
+# =============================================================================
+# STEP 4 — WEB SEARCH  (Tavily)
+# =============================================================================
+
+def search_web(query: str, max_chars: int = 800) -> list[dict]:
+    from tavily import TavilyClient
+    tavily  = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+    results = tavily.search(query=query, max_results=3)
+
+    return [
+        {
+            "title":   r.get("title", "Web Source"),
+            "url":     r.get("url", "#"),
+            "content": r.get("content", "")[:max_chars],
+        }
+        for r in results.get("results", [])
+    ]
+
+
+# =============================================================================
+# STEP 5 — CONTEXT BUILDER
+# Labels each chunk with its source document and heading so the LLM
+# knows exactly where each fact came from.
+# =============================================================================
+
+def build_context(db_chunks: list[dict], web_results: list[dict]) -> str:
+    parts = []
+
+    for chunk in db_chunks:
+        source   = chunk.get("source", "internal document")
+        heading  = chunk.get("heading", "")
+        category = chunk.get("doc_category", "")
+        text     = chunk.get("text", "")
+        label    = f"[{category.upper()} — {source}] {heading}"
+        parts.append(f"{label}\n{text}")
+
+    for w in web_results:
+        parts.append(f"[WEB — {w['title']}]\n{w['content']}")
+
+    return "\n\n---\n\n".join(parts)
+
+
+# =============================================================================
+# STEP 6 — CONVERSATION MEMORY
+# =============================================================================
+
 def build_memory_block(session_id: str, db: Session) -> str:
-    """
-    Fetches the last MEMORY_TURNS Q&A pairs from the DB for this session
-    and formats them as a conversation history block for the LLM.
-    """
     if not session_id:
         return ""
 
-    past_messages = (
+    past = (
         db.query(ChatMessage)
         .filter(ChatMessage.session_id == session_id)
         .order_by(ChatMessage.timestamp.desc())
@@ -134,93 +329,147 @@ def build_memory_block(session_id: str, db: Session) -> str:
         .all()
     )
 
-    if not past_messages:
+    if not past:
         return ""
 
-    # Reverse so oldest comes first
-    past_messages = list(reversed(past_messages))
+    past  = list(reversed(past))
+    lines = []
+    for msg in past:
+        lines.append(f"Previous Question: {msg.query}")
+        lines.append(f"Previous Answer: {msg.answer}")
 
-    memory_lines = []
-    for msg in past_messages:
-        memory_lines.append(f"Previous Question: {msg.query}")
-        memory_lines.append(f"Previous Answer: {msg.answer}")
+    print(f"[Memory] {len(past)} turn(s) loaded")
+    return "\n".join(lines)
 
-    memory_block = "\n".join(memory_lines)
-    print(f"[*] Memory loaded: {len(past_messages)} previous turn(s)")
-    return memory_block
 
-def get_embedding(text):
-    response = requests.post(
-        HF_API_URL,
-        headers=HF_HEADERS,
-        json={"inputs": text}
+# =============================================================================
+# STEP 7 — LLM CALLS
+# =============================================================================
+
+def query_llm(prompt: str, model: str = "llama-3.1-70b-versatile", temperature: float = 0.2) -> str:
+    try:
+        response = client.chat.completions.create(
+            model    = model,
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful company assistant. "
+                        "You answer questions about products, policies, SOPs, and training documents. "
+                        "Answer ONLY using the context provided. Do not use general knowledge. "
+                        "If the answer is not in the context, say: "
+                        "'I don't have that information in my documents. Please contact the relevant team.' "
+                        "Return plain text only — no markdown, no HTML. "
+                        "Be concise, accurate, and professional."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature = temperature,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[LLM Error] {e}")
+        return "Error connecting to LLM."
+
+
+def validate_answer(user_query: str, answer: str, context: str) -> dict:
+    prompt = f"""Validate this company assistant answer.
+Reply ONLY in this exact format:
+VALID: yes
+FEEDBACK: <one sentence>
+
+OR
+
+VALID: no
+FEEDBACK: <specific problem and how to fix it>
+
+Context (first 1500 chars): {context[:1500]}
+Question: {user_query}
+Answer: {answer}"""
+
+    response = client.chat.completions.create(
+        model      = "llama-3.1-8b-instant",
+        messages   = [{"role": "user", "content": prompt}],
+        temperature= 0,
     )
+    result   = response.choices[0].message.content.strip()
+    valid    = "valid: yes" in result.lower()
+    feedback = result.split("FEEDBACK:")[-1].strip() if "FEEDBACK:" in result else ""
+    print(f"[Validator] valid={valid} | {feedback}")
+    return {"valid": valid, "feedback": feedback}
 
-    result = response.json()
-    print(f"[*] HF response type: {type(result)}")
-    print(f"[*] HF response first element type: {type(result[0])}")
 
-    # ✅ Handle all 3 possible response shapes
-    if isinstance(result, list) and isinstance(result[0], float):
-        # Shape: [0.01, 0.04, ...] → flat list directly
-        print(f"[*] Embedding shape: flat list, dim={len(result)}")
-        return result
-    elif isinstance(result, list) and isinstance(result[0], list) and isinstance(result[0][0], float):
-        # Shape: [[0.01, 0.04, ...]] → single nested list
-        print(f"[*] Embedding shape: nested list, dim={len(result[0])}")
-        return result[0]
-    elif isinstance(result, list) and isinstance(result[0], list) and isinstance(result[0][0], list):
-        # Shape: [[[0.01, 0.04, ...]]] → double nested list
-        print(f"[*] Embedding shape: double nested list, dim={len(result[0][0])}")
-        return result[0][0]
-    else:
-        print(f"[!] Unknown embedding format: {str(result)[:200]}")
-        raise ValueError("Unexpected embedding response format from HuggingFace")
-    
-# --- Update your search_web function in app.py ---
-def search_web(query: str, max_chars_per_result=800) -> list:
-    from tavily import TavilyClient
-    tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-    results = tavily.search(query=query, max_results=3)
-    
-    # FIX: Return a list of dicts instead of strings
-    formatted_results = []
-    for r in results.get("results", []):
-        formatted_results.append({
-            "title": r.get("title", "Web Source"),
-            "url": r.get("url", "#"),
-            "content": r.get("content", "")[:max_chars_per_result]  # hard cap
-        })
+def generate_followups(user_query: str, answer: str) -> list[str]:
+    prompt = f"""Based on this Q&A from a company assistant, suggest 3 short follow-up questions.
 
-    return formatted_results
+Question: {user_query}
+Answer: {answer}
 
-# --- Update retrieve_and_answer to always return 3 items ---
-def retrieve_and_answer(user_query: str, route: str, memory_block: str = ""):
-    context_chunks = []
-    sources = {"db_sources": [], "internet_sources": []}
+Rules:
+- Each question under 10 words
+- Specific to the topic discussed (could be product, policy, SOP, training, etc.)
+- Return ONLY a JSON array of 3 strings, no explanation
+Example: ["What is the escalation process?", "Who approves this?", "Is there a form to fill?"]"""
+
+    try:
+        response = client.chat.completions.create(
+            model      = "llama-3.1-8b-instant",
+            messages   = [{"role": "user", "content": prompt}],
+            temperature= 0.4,
+        )
+        raw = response.choices[0].message.content.strip()
+        suggestions = json.loads(raw)
+        return suggestions if isinstance(suggestions, list) else []
+    except Exception as e:
+        print(f"[Followups] Error: {e}")
+        return []
+
+
+# =============================================================================
+# STEP 8 — CORE PIPELINE
+# =============================================================================
+
+def retrieve_and_answer(
+    user_query:   str,
+    parsed:       dict,
+    memory_block: str = "",
+) -> tuple[str, dict, str]:
+    """Returns (answer, sources_dict, context_string)"""
+
+    doc_category = parsed["doc_category"]
+    topic        = parsed["topic"]
+    route        = parsed["route"]
+
+    db_chunks   = []
+    web_results = []
 
     if route in ["db", "both"]:
-        embedding = get_embedding(user_query)
-        results = index.query(vector=embedding, top_k=SOURCES_ACCESSED, include_metadata=True)
-        db_chunks = [m["metadata"]["text"] for m in results["matches"] if m["metadata"].get("text")]
-        context_chunks.extend(db_chunks)
-        sources["db_sources"] = db_chunks
+        db_chunks = retrieve_from_db(user_query, doc_category, topic)
 
     if route in ["web", "both"]:
         web_results = search_web(user_query)
-        # Add only content to context, but keep full dicts for sources
-        context_chunks.extend([r["content"] for r in web_results])
-        sources["internet_sources"] = web_results
 
-    if not context_chunks:
-        # FIX: Always return 3 items (answer, sources, context_chunks)
-        return "I don't have enough information to answer that.", sources, []
+    context = build_context(db_chunks, web_results)
 
-    context = "\n\n".join(context_chunks)
-    memory_section = f"--- CONVERSATION HISTORY ---\n{memory_block}\n----------------------------\n" if memory_block else ""
+    if not context.strip():
+        sources = {"db_sources": [], "internet_sources": []}
+        return (
+            "I don't have enough information in my documents to answer that. "
+            "Please contact the relevant team.",
+            sources,
+            "",
+        )
+
+    memory_section = (
+        f"--- CONVERSATION HISTORY ---\n{memory_block}\n----------------------------\n"
+        if memory_block else ""
+    )
 
     prompt = f"""{memory_section}
-Use ONLY the following context to answer. Do not use outside knowledge.
+Use ONLY the following context to answer the question.
+The context may include product information, company policies, SOPs, or training material.
+If the answer is not present, say so clearly.
 
 --- CONTEXT ---
 {context}
@@ -229,138 +478,81 @@ Use ONLY the following context to answer. Do not use outside knowledge.
 Question: {user_query}
 Answer:"""
 
-    answer = query_llm(prompt)
-    return answer, sources, context_chunks
+    answer  = query_llm(prompt)
+    sources = {
+        "db_sources":       [c.get("text", "") for c in db_chunks],
+        "internet_sources": web_results,
+    }
 
-def validate_answer(user_query: str, answer: str, context_chunks: list) -> dict:
-    """Returns: {'valid': bool, 'feedback': str}"""
-    context = "\n\n".join(context_chunks)
+    return answer, sources, context
 
-    prompt = f"""Validate this retail assistant answer. Reply ONLY:
-VALID: yes
-FEEDBACK: <one sentence>
 
-OR
+def process_query(user_query: str, memory_block: str = "") -> tuple[str, dict]:
+    """
+    Full pipeline:
+      1. Parse intent (LLM-based, no hardcoding)
+      2. Retrieve from DB and/or web
+      3. Generate answer
+      4. Validate and retry if needed
+    """
+    parsed = parse_query(user_query)
 
-VALID: no  
-FEEDBACK: <specific problem>
-
-Context: {context[:1500]}  ← cap this too
-Question: {user_query}
-Answer: {answer}"""
-
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0
-    )
-
-    result = response.choices[0].message.content.strip()
-    valid = "VALID: yes" in result.lower()
-    feedback = result.split("FEEDBACK:")[-1].strip() if "FEEDBACK:" in result else ""
-    print(f"[Validator] Valid: {valid} | Feedback: {feedback}")
-    return {"valid": valid, "feedback": feedback}
-
-def generate_followups(user_query: str, answer: str) -> list[str]:
-    prompt = f"""You are a retail store assistant. Based on the conversation below, suggest 3 short follow-up questions the user might want to ask next.
-
-Question: {user_query}
-Answer: {answer}
-
-Rules:
-- Each suggestion must be under 10 words
-- Make them specific to the topic discussed
-- Return ONLY a JSON array of 3 strings, nothing else
-Example: ["What are the return policy details?", "Do you offer EMI options?", "Is this available in other colors?"]"""
-
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4
-        )
-        raw = response.choices[0].message.content.strip()
-        suggestions = json.loads(raw)
-        return suggestions if isinstance(suggestions, list) else []
-    except Exception as e:
-        print(f"[Followups] Error: {e}")
-        return []
-# =========================
-# CORE PIPELINE
-# =========================
-MAX_RETRIES = 2
-
-def process_query(user_query: str, memory_block: str = ""):
-    route = route_query(user_query)
+    last_feedback = ""
+    answer        = ""
+    sources       = {"db_sources": [], "internet_sources": []}
 
     for attempt in range(MAX_RETRIES):
-        retry_hint = ""
-        if attempt > 0:
-            retry_hint = f"\n\nPrevious attempt was rejected. Fix this issue: {last_feedback}"
-            print(f"[Retry] Attempt {attempt + 1}, feedback: {last_feedback}")
+        query_with_hint = user_query
+        if attempt > 0 and last_feedback:
+            query_with_hint = f"{user_query}\n\n[Fix this issue in your answer: {last_feedback}]"
+            print(f"[Retry] Attempt {attempt + 1} — hint: {last_feedback}")
 
-        answer, sources, context_chunks = retrieve_and_answer(
-            user_query + retry_hint, route, memory_block
-        )
+        answer, sources, context = retrieve_and_answer(query_with_hint, parsed, memory_block)
 
-        if not context_chunks:
+        if not context:
             return answer, sources
 
-        validation = validate_answer(user_query, answer, context_chunks)
+        validation = validate_answer(user_query, answer, context)
 
         if validation["valid"]:
-            print(f"[Pipeline] Answer passed validation on attempt {attempt + 1}")
+            print(f"[Pipeline] ✅ Passed validation on attempt {attempt + 1}")
             return answer, sources
 
         last_feedback = validation["feedback"]
 
-    # Return best effort after retries
-    print("[Pipeline] Max retries reached, returning last answer")
+    print("[Pipeline] Max retries reached — returning best-effort answer")
     return answer, sources
 
-# =========================
-# REQUEST MODELS
-# =========================
-class ChatRequest(BaseModel):
-    employee_id: str
-    session_id: str | None = None
-    query: str
-    role: str | None = None  # add this
 
-class RatingRequest(BaseModel):
-    rating: str  # "thumbs_up" or "thumbs_down"
-
-# =========================
+# =============================================================================
 # API ENDPOINTS
-# =========================
+# =============================================================================
 
 @app.get("/")
 def root():
-    return {"status": "Store Assistant API is running"}
+    return {"status": "Company Assistant API is running"}
 
-class LoginRequest(BaseModel):
-    email: str
-    password: str
 
 @app.post("/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
     employee = db.query(Employee).filter(Employee.email == request.email).first()
-    
+
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
-
     if employee.password_hash != request.password:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     return {
         "employee_id": employee.employee_id,
-        "name": employee.name,
-        "role": employee.role
+        "name":        employee.name,
+        "role":        employee.role,
     }
+
 
 @app.post("/chat")
 def chat(request: ChatRequest, db: Session = Depends(get_db)):
     # 1. Get or create session
+    session = None
     if request.session_id:
         try:
             session = db.query(ChatSession).filter(
@@ -368,8 +560,6 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
             ).first()
         except Exception:
             session = None
-    else:
-        session = None
 
     if not session:
         session = ChatSession(employee_id=request.employee_id)
@@ -377,10 +567,10 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(session)
 
-    # 2. Build memory from previous messages in this session
+    # 2. Build memory
     memory_block = build_memory_block(str(session.session_id), db)
 
-    # 3. Process query
+    # 3. Run pipeline
     answer, sources = process_query(request.query, memory_block)
 
     # 4. Log to DB
@@ -395,8 +585,8 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(message)
 
-    # After: answer, sources = process_query(...)
-    followups = generate_followups(request.query, answer)   # ← add this
+    # 5. Generate follow-ups
+    followups = generate_followups(request.query, answer)
 
     return {
         "session_id"      : str(session.session_id),
@@ -404,8 +594,9 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         "answer"          : answer,
         "db_sources"      : sources["db_sources"],
         "internet_sources": sources["internet_sources"],
-        "followups"       : followups,                      # ← add this
+        "followups"       : followups,
     }
+
 
 @app.patch("/chat/{message_id}/rate")
 def rate_message(message_id: str, request: RatingRequest, db: Session = Depends(get_db)):
@@ -420,12 +611,15 @@ def rate_message(message_id: str, request: RatingRequest, db: Session = Depends(
     db.commit()
     return {"message_id": message_id, "rating": request.rating}
 
+
 @app.get("/sessions/{session_id}/history")
 def get_history(session_id: str, db: Session = Depends(get_db)):
-    messages = db.query(ChatMessage).filter(
-        ChatMessage.session_id == session_id
-    ).order_by(ChatMessage.timestamp).all()
-
+    messages = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.timestamp)
+        .all()
+    )
     return {
         "session_id": session_id,
         "messages": [
@@ -434,11 +628,12 @@ def get_history(session_id: str, db: Session = Depends(get_db)):
                 "query"     : m.query,
                 "answer"    : m.answer,
                 "rating"    : m.rating,
-                "timestamp" : str(m.timestamp)
+                "timestamp" : str(m.timestamp),
             }
             for m in messages
-        ]
+        ],
     }
+
 
 if __name__ == "__main__":
     import uvicorn
