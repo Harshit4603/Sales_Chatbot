@@ -27,7 +27,7 @@ MEMORY_TURNS        = 5      # how many past Q&A pairs to include in the LLM pro
                              # increased from 3 — better conversational coherence
 DB_STRONG_THRESHOLD = 5      # min strong DB chunks needed to skip web search
                              # increased from 3 — avoids premature web fallback
-SCORE_THRESHOLD     = 0.25   # min Pinecone score to count a chunk as "strong"
+SCORE_THRESHOLD     = 0.45   # min Pinecone score to count a chunk as "strong"
                              # lowered from 0.60 — bge-base scores cluster 0.45–0.65
 
 # =============================================================================
