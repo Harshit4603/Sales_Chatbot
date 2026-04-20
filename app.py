@@ -1238,7 +1238,7 @@ def build_memory_block(session_id: str, db: Session) -> str:
 # STEP 7 — LLM CALLS (unchanged)
 # =============================================================================
 
-def query_llm(prompt: str, model: str = "llama-3.1-70b-versatile", temperature: float = 0.2) -> str:
+def query_llm(prompt: str, model: str = "llama-3.3-70b-versatile", temperature: float = 0.2) -> str:
     try:
         response = client.chat.completions.create(
             model    = model,
