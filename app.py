@@ -189,11 +189,14 @@ Given the user query below, return ONLY a valid JSON object with these fields:
                    Only relevant when query_type is "retrieval". Empty string otherwise.
 
 Rules:
-  - If the query is a greeting, introduction, or asks what you can do → query_type = "conversational"
-  - If the query needs internal company info → query_type = "retrieval"
+  - conversational ONLY IF: pure greeting ("hi", "hello", "thanks"), 
+    small talk, or explicitly asks what you can do ("what can you help with")
+  - informational ONLY IF: general world knowledge with zero connection 
+    to sleep, sofas, furniture, mattresses, or company operations
+  - retrieval FOR EVERYTHING ELSE — when in doubt, always choose retrieval
+  - Short or vague queries about products ("sofa recommendations", 
+    "mattress options", "best pillow") → ALWAYS retrieval, never informational
   - Default doc_category to "general" if unclear
-  - topic should be specific, not generic (e.g. "Valencia sofa warranty" not "warranty")
-  - Return ONLY the JSON object, no explanation, no markdown
 
 User query: {user_query}"""
 
