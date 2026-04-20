@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import asyncio
 import requests
 from dotenv import load_dotenv
 
@@ -24,46 +25,38 @@ load_dotenv()
 
 SOURCES_ACCESSED    = 10     # top_k chunks pulled from Pinecone per query
 MEMORY_TURNS        = 5      # how many past Q&A pairs to include in the LLM prompt
-                             # increased from 3 — better conversational coherence
-DB_STRONG_THRESHOLD = 5      # min strong DB chunks needed to skip web search
-                             # increased from 3 — avoids premature web fallback
+DB_STRONG_THRESHOLD = 4      # min strong DB chunks to consider DB context "rich"
 SCORE_THRESHOLD     = 0.25   # min Pinecone score to count a chunk as "strong"
-                             # lowered from 0.60 — bge-base scores cluster 0.45–0.65
+MAX_CONTEXT_CHARS   = 3000   # cap on DB context fed to LLM
 
 # =============================================================================
 # CLIENTS
 # =============================================================================
-HF_API_KEY = os.getenv("HF_API_KEY")
-HF_API_URL = "https://router.huggingface.co/hf-inference/models/BAAI/bge-base-en-v1.5"
-HF_HEADERS = {
-    "Authorization": f"Bearer {HF_API_KEY}",
-    "Content-Type": "application/json",
-}
+
+HF_API_KEY  = os.getenv("HF_API_KEY")
+HF_API_URL  = "https://router.huggingface.co/hf-inference/models/BAAI/bge-base-en-v1.5"
+HF_HEADERS  = {"Authorization": f"Bearer {HF_API_KEY}", "Content-Type": "application/json"}
+
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX = "sales-chatbot"
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")   # ← You can comment this out now
+PINECONE_INDEX   = "sales-chatbot"
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
-# New: Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+print("HF_API_KEY    :", "✅" if HF_API_KEY    else "❌ MISSING")
+print("PINECONE_KEY  :", "✅" if PINECONE_API_KEY else "❌ MISSING")
+print("GROQ_API_KEY  :", "✅" if GROQ_API_KEY   else "❌ MISSING")
+print("GEMINI_API_KEY:", "✅" if GEMINI_API_KEY  else "❌ MISSING")
 
-print("HF_API_KEY :", "✅" if HF_API_KEY else "❌ MISSING")
-print("PINECONE_KEY :", "✅" if PINECONE_API_KEY else "❌ MISSING")
-print("GROQ_API_KEY :", "✅" if GROQ_API_KEY else "❌ MISSING")
-print("GEMINI_API_KEY :", "✅" if GEMINI_API_KEY else "❌ MISSING")
-# print("ANTHROPIC_API_KEY :", "✅" if ANTHROPIC_API_KEY else "❌ MISSING")  # optional
-
-pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index(PINECONE_INDEX)
-groq_client = Groq(api_key=GROQ_API_KEY)
-
+pc           = Pinecone(api_key=PINECONE_API_KEY)
+index        = pc.Index(PINECONE_INDEX)
+groq_client  = Groq(api_key=GROQ_API_KEY)
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
+
 # =============================================================================
 # FASTAPI APP
 # =============================================================================
 
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -80,7 +73,7 @@ class ChatRequest(BaseModel):
     employee_id: str
     session_id:  str | None = None
     query:       str
-    role:        str | None = None   # "sales" | "employee" — used for retrieval filtering
+    role:        str | None = None   # "sales" | "employee"
 
 class RatingRequest(BaseModel):
     rating: str
@@ -89,107 +82,112 @@ class LoginRequest(BaseModel):
     email:    str
     password: str
 
-
 # =============================================================================
-# HELPER: Detect Product Queries
+# ROUTING SIGNALS
+# Centralised keyword lists used by the router. Edit here, not scattered
+# throughout the codebase.
 # =============================================================================
-def is_product_query(parsed: dict, user_query: str) -> bool:
-    """Return True if this should go to website (Gemini)"""
-    query_type = parsed.get("query_type", "")
-    doc_category = parsed.get("doc_category", "general")
-    topic = parsed.get("topic", "").lower()
-    q = user_query.lower()
 
-    # Strong signals
-    product_keywords = [
-        "sofa", "mattress", "pillow", "recliner", "bed", "chair", "valencia",
-        "color", "colour", "colors", "colours", "shade", "option", "variant",
-        "available in", "how many", "price", "warranty", "dimension", "size",
-        "recommend", "best", "which", "catalog"
-    ]
+# These trigger "retrieval" even when classifier says otherwise
+PRODUCT_SIGNALS = {
+    "sofa", "mattress", "pillow", "recliner", "bed", "chair",
+    "recommend", "suggest", "option", "catalog", "price", "warranty",
+    "sop", "policy", "leave", "training", "onboarding",
+    "dimension", "size", "color", "colour", "shade", "variant",
+    "available in", "how many", "best", "which",
+}
 
-    if query_type == "retrieval" and doc_category == "product":
-        return True
+# These force the COMPARISON sub-route (Gemini-first)
+COMPARISON_SIGNALS = {
+    "vs", "versus", "better than", "compare", "comparison",
+    "which one", "which is better", "difference between",
+    "wakefit", "sleepwell", "duroflex", "sunday", "competitor",
+    "against",
+}
 
-    if any(keyword in q for keyword in product_keywords):
-        return True
+# doc_categories that are "internal-only" — DB is authoritative
+INTERNAL_CATEGORIES = {"policy", "sop", "training"}
 
-    if "valencia" in q or "product" in doc_category:
-        return True
-
-    return False
+# Role-based Pinecone filter
+ROLE_CATEGORY_ALLOW = {
+    "sales":    {"product", "pricing", "faq", "general"},
+    "employee": {"product", "policy", "sop", "training", "pricing", "faq", "general"},
+}
 
 # =============================================================================
 # STEP 1 — QUERY PARSER
-# Classifies intent. Defaults aggressively to "retrieval" to prevent
-# hallucination from product/policy queries being routed to LLM-only paths.
 # =============================================================================
 
 def parse_query(user_query: str) -> dict:
-    prompt = f"""You are a query classifier for a 'The Sleep Company' assistant chatbot.
-The assistant has access to internal documents including:
+    """
+    Classifies the query into:
+      query_type   : conversational | informational | retrieval
+      doc_category : product | policy | sop | training | pricing | faq |
+                     comparison | general
+      topic        : short phrase for embedding context
+
+    'comparison' is a new category — triggers Gemini-first merge.
+    """
+    prompt = f"""You are a query classifier for 'The Sleep Company' assistant chatbot.
+The assistant has access to:
   - Product catalogs and specs (sofas, mattresses, pillows, recliners)
-  - Company SOPs (Standard Operating Procedures)
-  - HR and company policies
-  - Training manuals and guides
-  - Pricing documents
+  - Company SOPs, HR and company policies
+  - Training manuals, pricing documents
 
-Given the user query below, return ONLY a valid JSON object with these fields:
+Given the user query, return ONLY a valid JSON object with:
 
-  "query_type"   : one of ["conversational", "informational", "retrieval"]
+  "query_type": one of ["conversational", "informational", "retrieval"]
+    - "conversational" ONLY for: pure greetings, small talk, capability questions
+    - "informational"  ONLY for: general world knowledge with ZERO connection
+      to sleep, furniture, or company operations
+    - "retrieval" FOR EVERYTHING ELSE — when in doubt always choose retrieval
 
-  STRICT RULES for query_type:
-  - "conversational" ONLY IF: pure greeting ("hi", "hello", "thanks", "bye"),
-    small talk, OR explicitly asks what you can do ("what can you help with")
-  - "informational" ONLY IF: general world knowledge with ZERO connection
-    to sleep, sofas, furniture, mattresses, pillows, or company operations
-  - "retrieval" FOR EVERYTHING ELSE — when in doubt, ALWAYS choose retrieval
-  - Short or vague product queries ("sofa recommendations", "mattress options",
-    "best pillow", "what sofas do you have") → ALWAYS retrieval
-  - Any query mentioning a product name, category, price, warranty, SOP,
-    policy, or training → ALWAYS retrieval
+  "doc_category": one of ["product", "policy", "sop", "training", "pricing",
+                           "faq", "comparison", "general"]
+    - "comparison" when the query compares two products/brands OR asks
+      which is better (e.g. "Valencia vs Galway", "better than Wakefit")
+    - "product"    for specs, colors, features, recommendations of a single item
+    - Use others as appropriate
 
-  "doc_category" : one of ["product", "policy", "sop", "training", "pricing", "faq", "general"]
-                   Only relevant when query_type is "retrieval". Default "general" otherwise.
+  "topic": short phrase (max 6 words). Empty string for non-retrieval.
 
-  "topic"        : short phrase (max 6 words) describing the specific subject.
-                   Only relevant when query_type is "retrieval". Empty string otherwise.
-
-Return ONLY the JSON object, no explanation, no markdown.
+Return ONLY the JSON object.
 
 User query: {user_query}"""
 
     try:
-        response = groq_client.chat.completions.create(
-            model      = "llama-3.1-8b-instant",
-            messages   = [{"role": "user", "content": prompt}],
-            temperature= 0,
-            max_tokens = 80,
+        resp   = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=80,
         )
-        raw    = response.choices[0].message.content.strip()
+        raw    = resp.choices[0].message.content.strip()
         parsed = json.loads(raw)
 
-        valid_types      = {"conversational", "informational", "retrieval"}
-        valid_categories = {"product", "policy", "sop", "training", "pricing", "faq", "general"}
+        valid_types = {"conversational", "informational", "retrieval"}
+        valid_cats  = {"product", "policy", "sop", "training", "pricing",
+                       "faq", "comparison", "general"}
 
         query_type   = parsed.get("query_type", "retrieval")
         doc_category = parsed.get("doc_category", "general")
         topic        = parsed.get("topic", "")
 
-        if query_type   not in valid_types:      query_type   = "retrieval"
-        if doc_category not in valid_categories: doc_category = "general"
-        if not isinstance(topic, str):           topic        = ""
+        if query_type   not in valid_types: query_type   = "retrieval"
+        if doc_category not in valid_cats:  doc_category = "general"
+        if not isinstance(topic, str):      topic        = ""
 
-        # Safety net: if query contains product signals, force retrieval
-        product_signals = [
-            "sofa", "mattress", "pillow", "recliner", "bed", "chair",
-            "recommend", "suggest", "option", "catalog", "price", "warranty",
-            "sop", "policy", "leave", "training", "onboarding",
-        ]
-        if query_type != "retrieval" and any(
-            w in user_query.lower() for w in product_signals
-        ):
-            print(f"[Parser] Overriding {query_type} → retrieval (product signal detected)")
+        q_lower = user_query.lower()
+
+        # Comparison override — highest priority
+        if any(sig in q_lower for sig in COMPARISON_SIGNALS):
+            query_type   = "retrieval"
+            doc_category = "comparison"
+            print(f"[Parser] Comparison signal detected → doc_category=comparison")
+
+        # Product/internal signal override
+        elif query_type != "retrieval" and any(sig in q_lower for sig in PRODUCT_SIGNALS):
+            print(f"[Parser] Product signal → overriding {query_type} to retrieval")
             query_type = "retrieval"
 
         print(f"[Parser] type={query_type} | category={doc_category} | topic={topic!r}")
@@ -202,19 +200,16 @@ User query: {user_query}"""
 
 # =============================================================================
 # STEP 2 — QUERY REWRITER
-# Resolves pronouns and follow-up references before hitting Pinecone.
-# "What's its warranty?" → "What's the Valencia sofa warranty?"
-# This is the single biggest fix for conversational follow-up failures.
 # =============================================================================
 
 def rewrite_query(user_query: str, memory_block: str) -> str:
+    """Resolves pronouns and follow-up references before hitting Pinecone."""
     if not memory_block:
         return user_query
 
     prompt = f"""Rewrite the user's question as a fully self-contained search query.
-Resolve any pronouns, references like "it", "that one", "the same", or follow-up
-references using the conversation history below.
-Return ONLY the rewritten query as a single sentence. Nothing else.
+Resolve any pronouns or references using the conversation history.
+Return ONLY the rewritten query as a single sentence.
 
 Conversation history:
 {memory_block}
@@ -223,13 +218,13 @@ User question: {user_query}
 Rewritten query:"""
 
     try:
-        response = groq_client.chat.completions.create(
-            model      = "llama-3.1-8b-instant",
-            messages   = [{"role": "user", "content": prompt}],
-            temperature= 0,
-            max_tokens = 60,
+        resp      = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=60,
         )
-        rewritten = response.choices[0].message.content.strip()
+        rewritten = resp.choices[0].message.content.strip()
         if rewritten and rewritten != user_query:
             print(f"[Rewriter] '{user_query}' → '{rewritten}'")
         return rewritten
@@ -240,25 +235,15 @@ Rewritten query:"""
 
 # =============================================================================
 # STEP 3 — CONVERSATIONAL HANDLER
-# Short-circuits for greetings and capability questions.
 # =============================================================================
 
-# =============================================================================
-# STEP 3 — CONVERSATIONAL HANDLER (Dynamic & Context-Aware)
-# =============================================================================
 def handle_conversational(user_query: str, memory_block: str = "") -> str:
-    """Handles greetings intelligently by referring back to recent conversation dynamically."""
-    
     if not memory_block:
-        # Pure greeting - no history
-        prompt = f"""You are a friendly and professional assistant for 'The Sleep Company'.
-User sent a greeting. Respond warmly in 2-3 sentences.
-Mention you can help with product information, recommendations, SOPs, policies, and pricing.
-
+        prompt = f"""You are a friendly assistant for 'The Sleep Company'.
+Respond warmly in 2-3 sentences. Mention you can help with products,
+recommendations, SOPs, policies, and pricing.
 User message: {user_query}"""
-
     else:
-        # There is recent conversation history → make it contextual
         prompt = f"""You are a helpful assistant for 'The Sleep Company'.
 
 Recent conversation:
@@ -266,42 +251,30 @@ Recent conversation:
 
 User just said: "{user_query}"
 
-Instructions:
-- Greet the user warmly and naturally.
-- If the previous conversation was about products (sofa, recliner, mattress, recommendation, price, colors, etc.), politely refer back to it.
-- Do not repeat the full previous answer. Instead, offer to continue helping on that topic or ask what else they need.
-- Keep the response natural, concise (3-5 sentences max), and professional.
-- Never make up prices, colors, or specs.
-
-Respond directly to the user:"""
+Greet the user warmly. If previous conversation touched on products or
+policies, offer to continue. Keep it concise (3-5 sentences), professional.
+Never invent prices or specs. Respond directly:"""
 
     try:
-        response = groq_client.chat.completions.create(
+        resp = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6,
             max_tokens=180,
         )
-        return response.choices[0].message.content.strip()
+        return resp.choices[0].message.content.strip()
     except Exception as e:
         print(f"[Conversational] Error: {e}")
-        # Safe generic fallback
-        return "Good morning! 👋 I'm happy to help you today. How can I assist you with our products, policies, or anything else?"
+        return "Good morning! 👋 How can I assist you today?"
 
 
 # =============================================================================
 # STEP 4 — EMBEDDING
-# Context prefix MUST match ingest.py's build_embed_text() exactly.
-# Format: "Category: <doc_category>. Heading: <heading>.\n<query>"
 # =============================================================================
 
 def build_query_embed_text(query: str, doc_category: str, topic: str) -> str:
     heading_hint = topic if topic else "user query"
-    return (
-        f"Category: {doc_category}. "
-        f"Heading: {heading_hint}.\n"
-        f"{query}"
-    )
+    return f"Category: {doc_category}. Heading: {heading_hint}.\n{query}"
 
 
 def get_embedding(text: str) -> list[float]:
@@ -309,10 +282,8 @@ def get_embedding(text: str) -> list[float]:
     result   = response.json()
 
     if isinstance(result, dict):
-        if "error" in result:
-            raise Exception(f"HF API Error: {result['error']}")
-        if "estimated_time" in result:
-            raise Exception("model_loading")
+        if "error"          in result: raise Exception(f"HF API Error: {result['error']}")
+        if "estimated_time" in result: raise Exception("model_loading")
 
     if isinstance(result, list):
         if isinstance(result[0], float):        return result
@@ -341,15 +312,7 @@ def get_embedding_with_retry(text: str, retries: int = 5) -> list[float]:
 
 # =============================================================================
 # STEP 5 — PINECONE RETRIEVAL
-# Role-based filtering: sales reps only see customer-facing doc types.
-# Falls back to unfiltered if filtered results are too sparse.
 # =============================================================================
-
-# What each role is allowed to retrieve
-ROLE_CATEGORY_ALLOW = {
-    "sales":    {"product", "pricing", "faq", "general"},
-    "employee": {"product", "policy", "sop", "training", "pricing", "faq", "general"},
-}
 
 def retrieve_from_db(
     user_query:   str,
@@ -358,218 +321,71 @@ def retrieve_from_db(
     role:         str | None = None,
     top_k:        int = SOURCES_ACCESSED,
 ) -> list[dict]:
-    embed_text = build_query_embed_text(user_query, doc_category, topic)
-    embedding  = get_embedding_with_retry(embed_text)
+    # Use "product" embedding context for comparisons (best semantic match)
+    embed_category = "product" if doc_category == "comparison" else doc_category
+    embed_text     = build_query_embed_text(user_query, embed_category, topic)
+    embedding      = get_embedding_with_retry(embed_text)
 
-    # Build filter: combine doc_category + role restrictions
-    pinecone_filter = {}
+    allowed_categories = ROLE_CATEGORY_ALLOW.get(role) if role else None
+    pinecone_filter    = {}
 
-    allowed_categories = ROLE_CATEGORY_ALLOW.get(role, None) if role else None
-
-    if doc_category and doc_category != "general":
+    if doc_category == "comparison":
+        # Pull product chunks from both items being compared
+        pinecone_filter = {"doc_category": {"$eq": "product"}}
+    elif doc_category and doc_category != "general":
         if allowed_categories and doc_category not in allowed_categories:
-            # Queried category not allowed for this role — use role filter only
-            print(f"[Retrieval] Role '{role}' blocked category '{doc_category}' — using role filter")
+            print(f"[Retrieval] Role '{role}' blocked '{doc_category}' — using role filter")
             pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
         else:
             pinecone_filter = {"doc_category": {"$eq": doc_category}}
     elif allowed_categories and role == "sales":
-        # Sales rep with general query — restrict to allowed categories
         pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
 
     results = index.query(
-        vector          = embedding,
-        top_k           = top_k,
-        include_metadata= True,
-        filter          = pinecone_filter if pinecone_filter else None,
+        vector=embedding,
+        top_k=top_k,
+        include_metadata=True,
+        filter=pinecone_filter if pinecone_filter else None,
     )
     matches = results.get("matches", [])
 
-    # Fallback: if filter is too narrow, retry without it
+    # Fallback: if filter too narrow, retry without filter
     if len(matches) < 2 and pinecone_filter:
         print(f"[Retrieval] Filter too narrow — falling back to unfiltered")
-        results = index.query(
-            vector          = embedding,
-            top_k           = top_k,
-            include_metadata= True,
-        )
+        results = index.query(vector=embedding, top_k=top_k, include_metadata=True)
         matches = results.get("matches", [])
 
     valid = []
     for m in matches:
         if m["metadata"].get("text"):
-            chunk          = dict(m["metadata"])
+            chunk           = dict(m["metadata"])
             chunk["_score"] = m.get("score", 0.0)
             valid.append(chunk)
 
-    print(f"[Retrieval] {len(valid)} chunks (filter={pinecone_filter or 'none'})")
+    strong = [c for c in valid if c["_score"] >= SCORE_THRESHOLD]
+    print(f"[Retrieval] {len(valid)} chunks total | {len(strong)} strong "
+          f"(filter={pinecone_filter or 'none'})")
     return valid
 
 
 # =============================================================================
-# STEP 6 — GEMINI WEB SEARCH (replaces Claude)
-# Uses Gemini's native Grounding with Google Search tool.
-# Prioritises internal DB context and uses web search only when needed.
+# STEP 6 — CONTEXT BUILDER
 # =============================================================================
-# =============================================================================
-# STEP 6 — GEMINI WEB SEARCH (Enhanced for Product Queries)
-# Strongly encourages fetching fresh product info from the official website.
-# =============================================================================
-import time
-import random
-
-# =============================================================================
-# STEP 6 — GEMINI WEB SEARCH (Robust Version with Retry + Strong Product Focus)
-# =============================================================================
-def search_with_gemini(
-    user_query: str,
-    db_context: str = "",
-) -> dict:
-    """
-    Uses Gemini with Google Search grounding.
-    Includes retry on 503 errors + graceful fallback to Groq.
-    Optimized for product queries (colors, specs, etc.).
-    """
-    system_prompt = (
-        "You are a helpful internal assistant for 'The Sleep Company', supporting sales "
-        "representatives and employees.\n\n"
-        "Rules:\n"
-        "1. Always prioritize the internal company context if provided.\n"
-        "2. For product questions (colors, variants, price, warranty, dimensions, recommendations, "
-        "'best sofa', etc.), actively use Google Search to fetch the **latest accurate information** "
-        "from the official website: https://thesleepcompany.in\n"
-        "3. Clearly separate sources: Use 'From internal documents:' and 'From our website:' when needed.\n"
-        "4. Be professional, concise, and use bullet points for lists (especially colors).\n"
-        "5. Never invent or hallucinate product details, prices, or colors.\n"
-        "6. Never speak negatively about The Sleep Company.\n"
-
-        "For comparison questions (e.g., 'Valencia vs. Recliner', 'best sofa for back pain'),"
-        "always use Google Search to fetch latest details from thesleepcompany.in. or relevant competitors"
-        "Compare key points: design, comfort (SmartGRID technology), size, features, "
-        "price range, and suitability. Be balanced and helpful. "
-        "Clearly mention sources."
-    )
-
-    # Build user message
-    if db_context.strip():
-        user_message = (
-            f"Internal company context (PRIMARY source):\n"
-            f"---\n{db_context[:4000]}\n---\n\n"
-            f"User question: {user_query}\n\n"
-            f"Answer using internal context first. "
-            f"If details like colors, variants, or specs are missing/incomplete, "
-            f"use Google Search to get the latest information directly from thesleepcompany.in."
-        )
-    else:
-        user_message = (
-            f"User question: {user_query}\n\n"
-            f"This is likely a product query. Use Google Search to provide accurate, "
-            f"up-to-date information from https://thesleepcompany.in."
-        )
-
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            grounding_tool = types.Tool(google_search=types.GoogleSearch())
-
-            config = types.GenerateContentConfig(
-                tools=[grounding_tool],
-                temperature=0.1,          # Low for factual product answers
-                max_output_tokens=1200,
-                system_instruction=system_prompt,
-            )
-
-            response = genai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=user_message,
-                config=config,
-            )
-
-            answer = response.text.strip() if response.text else ""
-
-            # Extract grounding sources
-            web_sources = []
-            try:
-                if response.candidates and len(response.candidates) > 0:
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, 'grounding_metadata') and candidate.grounding_metadata:
-                        for chunk in getattr(candidate.grounding_metadata, 'grounding_chunks', []) or []:
-                            if hasattr(chunk, 'web') and chunk.web:
-                                web_sources.append({
-                                    "title": getattr(chunk.web, 'title', 'The Sleep Company'),
-                                    "url": getattr(chunk.web, 'uri', '')
-                                })
-            except Exception:
-                pass
-
-            # Fallback: extract official website URLs from answer
-            if not web_sources:
-                import re
-                url_pattern = re.compile(r'https?://[^\s\)\"\']+')
-                urls_found = url_pattern.findall(answer)
-                for url in urls_found[:6]:
-                    if "thesleepcompany.in" in url.lower():
-                        web_sources.append({"title": "The Sleep Company Website", "url": url})
-
-            print(f"[Gemini Search] Success on attempt {attempt+1} | Sources={len(web_sources)}")
-            return {"answer": answer, "web_sources": web_sources}
-
-        except Exception as e:
-            error_str = str(e).lower()
-            if any(x in error_str for x in ["503", "high demand", "unavailable", "overloaded"]):
-                wait = (2 ** attempt) + random.uniform(0.5, 2.0)
-                print(f"[Gemini Search] 503 High Demand - retrying in {wait:.1f}s (attempt {attempt+1}/{max_retries})")
-                time.sleep(wait)
-                continue
-            else:
-                print(f"[Gemini Search] Non-retryable error: {e}")
-                break
-
-    # Final fallback when all Gemini attempts fail
-    print("[Gemini Search] All retries failed → falling back to Groq LLM")
-    try:
-        fallback_prompt = f"""You are a helpful assistant for The Sleep Company.
-Answer this product-related question as accurately as possible.
-If you don't have exact details, politely direct the user to check the official website.
-
-Question: {user_query}"""
-
-        fallback_answer = query_llm(fallback_prompt, model="llama-3.3-70b-versatile", temperature=0.2)
-        
-        return {
-            "answer": fallback_answer + "\n\n(Note: Our search service is temporarily busy. Please verify the latest details on https://thesleepcompany.in)",
-            "web_sources": []
-        }
-    except Exception:
-        return {
-            "answer": "I'm currently experiencing high load on our search service. Please try again in a moment or visit https://thesleepcompany.in for the latest product information.",
-            "web_sources": []
-        }
-
-# =============================================================================
-# STEP 7 — CONTEXT BUILDER
-# Assembles DB chunks into a single text block for the LLM prompt.
-# Token budget: caps total context at ~3000 chars to prevent dilution.
-# =============================================================================
-
-MAX_CONTEXT_CHARS = 3000
 
 def build_context(db_chunks: list[dict]) -> str:
-    parts        = []
-    total_chars  = 0
+    parts       = []
+    total_chars = 0
 
     for chunk in db_chunks:
         source   = chunk.get("source", "internal document")
         heading  = chunk.get("heading", "")
         category = chunk.get("doc_category", "")
         text     = chunk.get("text", "")
-        score    = chunk.get("_score", 0.0)
-
-        label = f"[{category.upper()} — {source}] {heading}"
-        entry = f"{label}\n{text}"
+        label    = f"[{category.upper()} — {source}] {heading}"
+        entry    = f"{label}\n{text}"
 
         if total_chars + len(entry) > MAX_CONTEXT_CHARS:
-            print(f"[Context] Token budget reached — stopped at {len(parts)} chunks")
+            print(f"[Context] Budget reached at {len(parts)} chunks")
             break
 
         parts.append(entry)
@@ -579,7 +395,7 @@ def build_context(db_chunks: list[dict]) -> str:
 
 
 # =============================================================================
-# STEP 8 — CONVERSATION MEMORY
+# STEP 7 — CONVERSATION MEMORY
 # =============================================================================
 
 def build_memory_block(session_id: str, db: Session) -> str:
@@ -593,7 +409,6 @@ def build_memory_block(session_id: str, db: Session) -> str:
         .limit(MEMORY_TURNS)
         .all()
     )
-
     if not past:
         return ""
 
@@ -608,109 +423,372 @@ def build_memory_block(session_id: str, db: Session) -> str:
 
 
 # =============================================================================
-# STEP 9 — GROQ LLM (used for DB-only answers)
+# STEP 8 — GROQ LLM (internal-doc-grounded answers)
 # =============================================================================
 
-def query_llm(prompt: str, model: str = "llama-3.3-70b-versatile", temperature: float = 0.2) -> str:
-    try:
-        response = groq_client.chat.completions.create(
-            model    = model,
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an internal company assistant for sales representatives "
-                        "and employees of 'The Sleep Company'.\n\n"
-                        "Your role:\n"
-                        "- Help with product recommendations\n"
-                        "- Answer SOP, policy, and training-related questions\n"
-                        "- Assist sales reps in customer conversations\n\n"
-                        "CRITICAL RULES:\n"
-                        "- Use ONLY the provided context\n"
-                        "- Do NOT use outside knowledge\n"
-                        "- Do NOT hallucinate product names, prices, or specs\n\n"
-                        "If information is missing:\n"
-                        "- Say: 'I don't have that information. Please contact the relevant team.'\n\n"
-                        "STYLE:\n"
-                        "- Professional, concise, point-wise\n"
-                        "- Plain text only\n\n"
-                        "COMPANY RULE:\n"
-                        "- Never portray the company negatively\n"
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature = temperature,
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"[LLM Error] {e}")
-        return "I'm facing a temporary issue. Please try again."
-    
-# =============================================================================
-# VALIDATOR — Chooses the best response + gives feedback
-# =============================================================================
-def validate_responses(
-    user_query: str,
-    response_a: str,   # Groq / DB response
-    response_b: str,   # Gemini / Web response
-    db_context: str = ""
-) -> dict:
-    prompt = f"""You are an expert validator for The Sleep Company chatbot.
+GROQ_SYSTEM_PROMPT = """You are an internal assistant for sales representatives
+and employees of 'The Sleep Company'.
 
-Compare these TWO answers for the same user query.
+Your role:
+- Help with product recommendations
+- Answer SOP, policy, and training-related questions
+- Assist sales reps in customer conversations
 
-User Query: {user_query}
+CRITICAL RULES:
+- Use ONLY the provided context
+- Do NOT hallucinate product names, prices, or specs
+- If information is missing say: 'I don't have that detail in our internal docs.'
 
-Response A (Internal DB + Groq):
-{response_a}
+STYLE: Professional, concise, point-wise. Plain text only.
+COMPANY RULE: Never portray the company negatively."""
 
-Response B (Gemini + Web Search):
-{response_b}
 
-Internal Context Available:
-{db_context[:2000] if db_context else "None"}
-
-Evaluate both on these criteria (1-5 scale):
-- Accuracy & Factual Correctness (especially product details)
-- Relevance to the query
-- Use of internal knowledge when available
-- Avoidance of hallucination
-- Helpfulness & Clarity
-- Professional tone
-
-Return ONLY valid JSON:
-{{
-  "winner": "A" or "B" or "tie",
-  "score_a": <int 1-5>,
-  "score_b": <int 1-5>,
-  "reason": "short explanation why you chose this one",
-  "feedback": "specific improvements if any"
-}}
-
-If both are bad (score ≤ 2), set winner to "retry".
-"""
-
+def query_groq(prompt: str, model: str = "llama-3.3-70b-versatile",
+               temperature: float = 0.2) -> str:
     try:
         resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=300,
+            model=model,
+            messages=[
+                {"role": "system", "content": GROQ_SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            temperature=temperature,
         )
-        raw = resp.choices[0].message.content.strip()
-
-        # Clean JSON if needed
-        if raw.startswith("```json"): raw = raw.split("```json")[1].split("```")[0].strip()
-        elif raw.startswith("```"): raw = raw.split("```")[1].strip()
-
-        result = json.loads(raw)
-        return result
-
+        return resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[Validator] Error: {e}")
-        return {"winner": "B", "score_a": 2, "score_b": 4, "reason": "Validator failed, default to Gemini", "feedback": ""}
+        print(f"[Groq Error] {e}")
+        return ""
 
+
+# =============================================================================
+# STEP 9 — GEMINI WEB SEARCH
+# =============================================================================
+
+import random
+
+GEMINI_SYSTEM_PROMPT = """You are a helpful internal assistant for 'The Sleep Company',
+supporting sales representatives and employees.
+
+Rules:
+1. Always prioritise internal company context if provided.
+2. For product questions, comparisons, and competitor queries, use Google Search
+   to fetch the latest accurate information from https://thesleepcompany.in
+3. Be professional, concise, and use bullet points for lists.
+4. Never invent product details, prices, or colors.
+5. Never speak negatively about The Sleep Company.
+6. For comparisons: compare design, comfort (SmartGRID), size, features,
+   price range, suitability. Be balanced. Mention sources."""
+
+
+def search_with_gemini(user_query: str, db_context: str = "") -> dict:
+    """
+    Calls Gemini with Google Search grounding.
+    db_context is injected as primary source so Gemini can synthesize both.
+    Returns {"answer": str, "web_sources": list[dict]}
+    """
+    if db_context.strip():
+        user_message = (
+            f"Internal company context (PRIMARY — use this first):\n"
+            f"---\n{db_context[:4000]}\n---\n\n"
+            f"User question: {user_query}\n\n"
+            f"Answer using internal context first. If colors, variants, live pricing, "
+            f"or competitor details are missing, use Google Search to fill gaps from "
+            f"https://thesleepcompany.in."
+        )
+    else:
+        user_message = (
+            f"User question: {user_query}\n\n"
+            f"Use Google Search to provide accurate, up-to-date information "
+            f"from https://thesleepcompany.in."
+        )
+
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            grounding_tool = types.Tool(google_search=types.GoogleSearch())
+            config = types.GenerateContentConfig(
+                tools=[grounding_tool],
+                temperature=0.1,
+                max_output_tokens=1200,
+                system_instruction=GEMINI_SYSTEM_PROMPT,
+            )
+            response = genai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=user_message,
+                config=config,
+            )
+
+            answer      = response.text.strip() if response.text else ""
+            web_sources = []
+
+            try:
+                if response.candidates:
+                    candidate = response.candidates[0]
+                    if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
+                        for chunk in getattr(candidate.grounding_metadata,
+                                             "grounding_chunks", []) or []:
+                            if hasattr(chunk, "web") and chunk.web:
+                                web_sources.append({
+                                    "title": getattr(chunk.web, "title", "The Sleep Company"),
+                                    "url":   getattr(chunk.web, "uri",   ""),
+                                })
+            except Exception:
+                pass
+
+            # Fallback URL extraction
+            if not web_sources:
+                import re
+                for url in re.findall(r"https?://[^\s\)\"\']+", answer)[:6]:
+                    if "thesleepcompany.in" in url.lower():
+                        web_sources.append({"title": "The Sleep Company", "url": url})
+
+            print(f"[Gemini] ✅ attempt={attempt+1} | sources={len(web_sources)}")
+            return {"answer": answer, "web_sources": web_sources}
+
+        except Exception as e:
+            err = str(e).lower()
+            if any(x in err for x in ["503", "high demand", "unavailable", "overloaded"]):
+                wait = (2 ** attempt) + random.uniform(0.5, 2.0)
+                print(f"[Gemini] 503 — retrying in {wait:.1f}s (attempt {attempt+1})")
+                time.sleep(wait)
+            else:
+                print(f"[Gemini] Non-retryable error: {e}")
+                break
+
+    # Groq fallback when all Gemini attempts fail
+    print("[Gemini] All retries failed → Groq fallback")
+    fallback = query_groq(
+        f"Answer as best you can, and if unsure, direct the user to "
+        f"https://thesleepcompany.in\n\nQuestion: {user_query}",
+        model="llama-3.3-70b-versatile",
+        temperature=0.2,
+    )
+    return {
+        "answer": (fallback or "Please visit https://thesleepcompany.in for the latest info.")
+                  + "\n\n_(Search service temporarily busy — please verify details online.)_",
+        "web_sources": [],
+    }
+
+
+# =============================================================================
+# STEP 10 — ASYNC PARALLEL FETCH
+# Runs DB retrieval and Gemini search simultaneously to cut latency.
+# =============================================================================
+
+async def fetch_db_async(user_query: str, doc_category: str, topic: str,
+                         role: str | None) -> list[dict]:
+    """Wraps synchronous DB retrieval for asyncio.gather."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, retrieve_from_db, user_query, doc_category, topic, role
+    )
+
+
+async def fetch_gemini_async(user_query: str, db_context: str) -> dict:
+    """Wraps synchronous Gemini call for asyncio.gather."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, search_with_gemini, user_query, db_context
+    )
+
+
+# =============================================================================
+# STEP 11 — SMART MERGER
+#
+# Strategy map (deterministic — no LLM judge):
+#
+#   comparison   → Gemini is primary (it searched the web); DB appends
+#                  any internal spec not already covered
+#   product      → Gemini is primary; DB informs the Gemini prompt
+#                  (already done by passing db_context into search_with_gemini)
+#   internal     → DB/Groq is primary; Gemini adds "Additional context"
+#                  section only if it found something meaningfully different
+#   general      → Gemini primary; DB supplements if strong chunks exist
+#
+# We do NOT ask an LLM to pick a winner. We choose the merge rule based
+# on doc_category and DB strength — fully deterministic.
+# =============================================================================
+
+def count_strong(db_chunks: list[dict]) -> int:
+    return sum(1 for c in db_chunks if c.get("_score", 0) >= SCORE_THRESHOLD)
+
+
+def smart_merge(
+    user_query:    str,
+    doc_category:  str,
+    db_chunks:     list[dict],
+    db_context:    str,
+    groq_answer:   str,
+    gemini_result: dict,
+) -> tuple[str, dict]:
+    """
+    Deterministically merges DB and Gemini answers based on query category.
+    Returns (final_answer, sources_dict).
+    """
+    gemini_answer = gemini_result.get("answer", "")
+    web_sources   = gemini_result.get("web_sources", [])
+    db_sources    = [c.get("text", "") for c in db_chunks]
+    strong_count  = count_strong(db_chunks)
+
+    # ── COMPARISON queries ────────────────────────────────────────────────────
+    # Gemini searched the web and has the most complete picture.
+    # Groq/DB is not used as primary; DB context was already given to Gemini.
+    if doc_category == "comparison":
+        print("[Merge] Strategy: COMPARISON → Gemini primary")
+        if not gemini_answer:
+            # Gemini failed entirely
+            final = (
+                "I couldn't retrieve a live comparison right now. "
+                "Please visit https://thesleepcompany.in or contact the sales team."
+            )
+        else:
+            final = gemini_answer
+        return final, {"db_sources": db_sources, "web_sources": web_sources}
+
+    # ── INTERNAL queries (policy, sop, training) ──────────────────────────────
+    # DB/Groq is authoritative. Gemini supplements only if it adds new info.
+    if doc_category in INTERNAL_CATEGORIES:
+        print(f"[Merge] Strategy: INTERNAL ({doc_category}) → Groq primary")
+        if not groq_answer:
+            # DB had nothing; fall back to Gemini
+            final = gemini_answer or (
+                "I don't have that information in our internal documents. "
+                "Please contact the relevant team."
+            )
+        elif gemini_answer and gemini_answer.strip() and len(gemini_answer) > 80:
+            # Gemini found supplementary public info — append it
+            final = (
+                f"{groq_answer}\n\n"
+                f"**Additional context (public sources):**\n{gemini_answer}"
+            )
+        else:
+            final = groq_answer
+        return final, {"db_sources": db_sources, "web_sources": web_sources}
+
+    # ── PRODUCT / PRICING / FAQ / GENERAL ────────────────────────────────────
+    # Gemini is primary (live product data, colors, prices).
+    # If Gemini failed, fall back to Groq only if DB was strong.
+    print(f"[Merge] Strategy: PRODUCT/GENERAL → Gemini primary")
+
+    if gemini_answer:
+        final = gemini_answer
+    elif groq_answer and strong_count >= DB_STRONG_THRESHOLD:
+        print("[Merge] Gemini empty → falling back to Groq (strong DB)")
+        final = groq_answer
+    elif groq_answer:
+        final = (
+            f"{groq_answer}\n\n"
+            f"_(For the latest details, please visit https://thesleepcompany.in)_"
+        )
+    else:
+        final = (
+            "I couldn't find specific information for your query. "
+            "Please visit https://thesleepcompany.in or contact our team."
+        )
+
+    return final, {"db_sources": db_sources, "web_sources": web_sources}
+
+
+# =============================================================================
+# STEP 12 — PARALLEL RETRIEVE AND ANSWER
+#
+# Flow:
+#   1. Rewrite query (pronoun resolution)
+#   2. Launch DB retrieval in background thread
+#   3. If category needs Gemini (product/comparison/general):
+#        - Wait for DB → build context → launch Gemini with context in parallel
+#      If category is internal-only:
+#        - Wait for DB → Groq answers → Gemini runs in parallel for supplement
+#   4. Await both → smart_merge → return
+#
+# Note: We cannot run DB and Gemini fully in parallel for product queries
+# because Gemini needs db_context for grounding. However we do run Gemini
+# and Groq in parallel for internal queries where Groq doesn't need web data.
+# =============================================================================
+
+async def parallel_retrieve_and_answer_async(
+    user_query:   str,
+    parsed:       dict,
+    memory_block: str       = "",
+    role:         str | None = None,
+) -> tuple[str, dict]:
+
+    doc_category = parsed["doc_category"]
+    topic        = parsed["topic"]
+
+    retrieval_query = rewrite_query(user_query, memory_block)
+
+    # ── Phase 1: DB retrieval (always needed) ────────────────────────────────
+    db_chunks  = await fetch_db_async(retrieval_query, doc_category, topic, role)
+    db_context = build_context(db_chunks) if db_chunks else ""
+
+    memory_section = (
+        f"--- CONVERSATION HISTORY ---\n{memory_block}\n---\n\n"
+        if memory_block else ""
+    )
+
+    # ── Phase 2: Run Groq + Gemini in parallel ───────────────────────────────
+    # Groq task — only meaningful when DB has content
+    if db_chunks:
+        groq_prompt = (
+            f"{memory_section}"
+            f"Use ONLY the following internal context to answer.\n"
+            f"--- CONTEXT ---\n{db_context}\n---------------\n"
+            f"Question: {user_query}\nAnswer:"
+        )
+        loop      = asyncio.get_event_loop()
+        groq_task = loop.run_in_executor(None, query_groq, groq_prompt)
+    else:
+        groq_task = asyncio.coroutine(lambda: "")()
+
+    # Gemini task — always runs (it has db_context for grounding)
+    gemini_task = fetch_gemini_async(user_query, db_context)
+
+    # Await both
+    groq_answer, gemini_result = await asyncio.gather(groq_task, gemini_task)
+
+    groq_answer = groq_answer or ""
+
+    print(f"[Parallel] Groq={'✅' if groq_answer else '❌'} "
+          f"Gemini={'✅' if gemini_result.get('answer') else '❌'}")
+
+    # ── Phase 3: Smart merge ─────────────────────────────────────────────────
+    return smart_merge(
+        user_query, doc_category, db_chunks, db_context, groq_answer, gemini_result
+    )
+
+
+def parallel_retrieve_and_answer(
+    user_query:   str,
+    parsed:       dict,
+    memory_block: str       = "",
+    role:         str | None = None,
+) -> tuple[str, dict]:
+    """Synchronous wrapper for FastAPI endpoints."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Already inside an event loop (e.g. during testing)
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role)
+                )
+                return future.result()
+        else:
+            return loop.run_until_complete(
+                parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role)
+            )
+    except RuntimeError:
+        return asyncio.run(
+            parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role)
+        )
+
+
+# =============================================================================
+# STEP 13 — FOLLOW-UP SUGGESTIONS
+# =============================================================================
 
 def generate_followups(user_query: str, answer: str) -> list[str]:
     prompt = f"""Based on this Q&A from a Sleep Company assistant, suggest 3 short follow-up questions.
@@ -725,12 +803,12 @@ Rules:
 Example: ["What is the warranty period?", "Is it available in white?", "What's the price?"]"""
 
     try:
-        response = groq_client.chat.completions.create(
-            model      = "llama-3.1-8b-instant",
-            messages   = [{"role": "user", "content": prompt}],
-            temperature= 0.4,
+        resp = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
         )
-        raw         = response.choices[0].message.content.strip()
+        raw         = resp.choices[0].message.content.strip()
         suggestions = json.loads(raw)
         return suggestions if isinstance(suggestions, list) else []
     except Exception as e:
@@ -739,107 +817,16 @@ Example: ["What is the warranty period?", "Is it available in white?", "What's t
 
 
 # =============================================================================
-# STEP 10 — RETRIEVE AND ANSWER
-#
-# Three-path routing based on DB result quality:
-#
-#   Path A — DB strong (>= DB_STRONG_THRESHOLD strong chunks):
-#     → Build context from DB chunks
-#     → Answer with Groq LLM (fast, cheap, grounded in internal docs)
-#     → No web search
-#
-#   Path B — DB weak + web needed:
-#     → Pass weak DB context to Claude
-#     → Claude searches the web AND merges with internal context
-#     → Returns Claude's synthesised answer
-#
-#   Path C — DB empty:
-#     → Pure Claude web search, no internal context
-#     → Fallback message if Claude also fails
+# STEP 14 — TOP-LEVEL ROUTER
 # =============================================================================
 
-# =============================================================================
-# STEP 10 — RETRIEVE AND ANSWER (Updated for Product Queries)
-# =============================================================================
-# =============================================================================
-# NEW: DUAL PATH + VALIDATOR (for every query)
-# =============================================================================
-def dual_path_with_validation(
-    user_query: str,
-    parsed: dict,
-    memory_block: str = "",
-    role: str | None = None,
-    max_retries: int = 1
+def process_query(
+    user_query:   str,
+    memory_block: str       = "",
+    role:         str | None = None,
 ) -> tuple[str, dict]:
-    """Generates two answers → validator picks best → retry once if needed"""
-    
-    doc_category = parsed["doc_category"]
-    topic = parsed["topic"]
 
-    retrieval_query = rewrite_query(user_query, memory_block)
-    db_chunks = retrieve_from_db(retrieval_query, doc_category, topic, role=role)
-    db_context = build_context(db_chunks) if db_chunks else ""
-
-    attempt = 0
-    while attempt <= max_retries:
-        attempt += 1
-        print(f"[DualPath] Attempt {attempt}")
-
-        # === Response A: Groq + DB only ===
-        if db_chunks:
-            context = build_context(db_chunks)
-            memory_section = f"--- CONVERSATION HISTORY ---\n{memory_block}\n---\n" if memory_block else ""
-            prompt_a = f"""{memory_section}Use ONLY the following context to answer.
---- CONTEXT ---
-{context}
----------------
-Question: {user_query}
-Answer:"""
-            response_a = query_llm(prompt_a)
-        else:
-            response_a = "I don't have internal information for this query."
-
-        # === Response B: Gemini + Web ===
-        result_b = search_with_gemini(user_query, db_context=db_context)
-        response_b = result_b["answer"] or "I couldn't fetch web information right now."
-
-        # === Validate ===
-        validation = validate_responses(user_query, response_a, response_b, db_context)
-
-        winner = validation.get("winner", "B")
-        print(f"[Validator] Winner: {winner} | Score A:{validation.get('score_a')} B:{validation.get('score_b')}")
-
-        if winner == "retry" and attempt <= max_retries:
-            print("[Validator] Both responses bad → retrying...")
-            continue
-
-        # Choose winner
-        if winner == "A":
-            answer = response_a
-            sources = {"db_sources": [c.get("text", "") for c in db_chunks], "web_sources": []}
-        else:
-            answer = response_b
-            sources = {
-                "db_sources": [c.get("text", "") for c in db_chunks],
-                "web_sources": result_b.get("web_sources", [])
-            }
-
-        # Optional: attach validator feedback in logs
-        print(f"[Validator Feedback] {validation.get('reason')}")
-
-        return answer, sources
-
-    # Final fallback after all retries
-    return (
-        response_b or "I'm having trouble answering right now. Please check our website or try again.",
-        {"db_sources": [], "web_sources": []}
-    )
-# =============================================================================
-# STEP 11 — PROCESS QUERY (top-level router)
-# =============================================================================
-
-def process_query(user_query: str, memory_block: str = "", role: str | None = None):
-    parsed = parse_query(user_query)
+    parsed     = parse_query(user_query)
     query_type = parsed["query_type"]
 
     if query_type == "conversational":
@@ -848,13 +835,17 @@ def process_query(user_query: str, memory_block: str = "", role: str | None = No
         return answer, {"db_sources": [], "web_sources": []}
 
     if query_type == "informational":
-        print("[Pipeline] Informational — LLM only")
-        answer = query_llm(f"Answer concisely:\n{user_query}", model="llama-3.1-8b-instant")
+        print("[Pipeline] Informational — Groq only")
+        answer = query_groq(
+            f"Answer concisely:\n{user_query}",
+            model="llama-3.1-8b-instant",
+        )
         return answer, {"db_sources": [], "web_sources": []}
 
-    # === NEW DUAL PATH FOR EVERYTHING ELSE ===
-    print("[Pipeline] Dual Path + Validator activated")
-    return dual_path_with_validation(user_query, parsed, memory_block, role)
+    # All retrieval queries (product / comparison / policy / sop / training / …)
+    print(f"[Pipeline] Retrieval ({parsed['doc_category']}) — parallel fetch + smart merge")
+    return parallel_retrieve_and_answer(user_query, parsed, memory_block, role)
+
 
 # =============================================================================
 # API ENDPOINTS
@@ -868,17 +859,11 @@ def root():
 @app.post("/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
     employee = db.query(Employee).filter(Employee.email == request.email).first()
-
     if not employee:
         raise HTTPException(status_code=404, detail="Employee not found")
     if employee.password_hash != request.password:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    return {
-        "employee_id": employee.employee_id,
-        "name":        employee.name,
-        "role":        employee.role,
-    }
+    return {"employee_id": employee.employee_id, "name": employee.name, "role": employee.role}
 
 
 @app.post("/chat")
@@ -902,7 +887,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     # 2. Build memory
     memory_block = build_memory_block(str(session.session_id), db)
 
-    # 3. Run pipeline — pass role for retrieval filtering
+    # 3. Run pipeline
     answer, sources = process_query(request.query, memory_block, role=request.role)
 
     # 4. Log to DB
@@ -917,7 +902,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(message)
 
-    # 5. Generate follow-ups (skip for conversational — no sources)
+    # 5. Follow-up suggestions (skip for conversational)
     followups = []
     if sources["db_sources"] or sources["web_sources"]:
         followups = generate_followups(request.query, answer)
@@ -937,10 +922,8 @@ def rate_message(message_id: str, request: RatingRequest, db: Session = Depends(
     message = db.query(ChatMessage).filter(
         ChatMessage.message_id == message_id
     ).first()
-
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
-
     message.rating = request.rating
     db.commit()
     return {"message_id": message_id, "rating": request.rating}
