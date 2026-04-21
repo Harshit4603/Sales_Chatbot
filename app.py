@@ -119,83 +119,96 @@ ROLE_CATEGORY_ALLOW = {
 # =============================================================================
 
 def parse_query(user_query: str) -> dict:
-    """
-    Classifies the query into:
-      query_type   : conversational | informational | retrieval
-      doc_category : product | policy | sop | training | pricing | faq |
-                     comparison | general
-      topic        : short phrase for embedding context
+    prompt = f"""You are a query analyzer for 'The Sleep Company' assistant.
 
-    'comparison' is a new category — triggers Gemini-first merge.
-    """
-    prompt = f"""You are a query classifier for 'The Sleep Company' assistant chatbot.
-The assistant has access to:
-  - Product catalogs and specs (sofas, mattresses, pillows, recliners)
-  - Company SOPs, HR and company policies
-  - Training manuals, pricing documents
+Analyze the user query across THREE independent dimensions:
 
-Given the user query, return ONLY a valid JSON object with:
+1. NEEDS_LIVE_DATA (true/false)
+   true if answer could change week-to-week:
+   - prices, offers, discounts, EMI, availability, stock
+   - competitor comparisons, new launches, "vs", "better than"
+   false if answer is stable:
+   - product features, dimensions, materials, care instructions
+   - company policies, SOPs, training docs, FAQs
 
-  "query_type": one of ["conversational", "informational", "retrieval"]
-    - "conversational" ONLY for: pure greetings, small talk, capability questions
-    - "informational"  ONLY for: general world knowledge with ZERO connection
-      to sleep, furniture, or company operations
-    - "retrieval" FOR EVERYTHING ELSE — when in doubt always choose retrieval
+2. NEEDS_INTERNAL_DOCS (true/false)
+   true if answer lives in company documents:
+   - product specs, SOPs, HR policy, training, FAQs
+   false if it's general conversation or world knowledge
 
-  "doc_category": one of ["product", "policy", "sop", "training", "pricing",
-                           "faq", "comparison", "general"]
-    - "comparison" when the query compares two products/brands OR asks
-      which is better (e.g. "Valencia vs Galway", "better than Wakefit")
-    - "product"    for specs, colors, features, recommendations of a single item
-    - Use others as appropriate
+3. CONVERSATION_TYPE
+   - "chit_chat"       → greetings, small talk, "what can you do?"
+   - "world_knowledge" → zero connection to sleep/furniture/company
+   - "work_query"      → anything about products, company, operations
 
-  "topic": short phrase (max 6 words). Empty string for non-retrieval.
-
-Return ONLY the JSON object.
+Return ONLY valid JSON, no explanation:
+{{
+  "needs_live_data": true | false,
+  "needs_internal_docs": true | false,
+  "conversation_type": "chit_chat" | "world_knowledge" | "work_query",
+  "topic": "<max 6 words, empty string for chit_chat/world_knowledge>"
+}}
 
 User query: {user_query}"""
 
     try:
-        resp   = groq_client.chat.completions.create(
+        resp = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=80,
+            max_tokens=100,
         )
         raw    = resp.choices[0].message.content.strip()
         parsed = json.loads(raw)
 
-        valid_types = {"conversational", "informational", "retrieval"}
-        valid_cats  = {"product", "policy", "sop", "training", "pricing",
-                       "faq", "comparison", "general"}
+        needs_live     = bool(parsed.get("needs_live_data", False))
+        needs_internal = bool(parsed.get("needs_internal_docs", True))
+        conv_type      = parsed.get("conversation_type", "work_query")
+        topic          = parsed.get("topic", "")
 
-        query_type   = parsed.get("query_type", "retrieval")
-        doc_category = parsed.get("doc_category", "general")
-        topic        = parsed.get("topic", "")
+        if conv_type not in {"chit_chat", "world_knowledge", "work_query"}:
+            conv_type = "work_query"
+        if not isinstance(topic, str):
+            topic = ""
 
-        if query_type   not in valid_types: query_type   = "retrieval"
-        if doc_category not in valid_cats:  doc_category = "general"
-        if not isinstance(topic, str):      topic        = ""
+        # Derive query_type and doc_category deterministically
+        if conv_type == "chit_chat":
+            query_type, doc_category = "conversational", "none"
 
-        q_lower = user_query.lower()
+        elif conv_type == "world_knowledge":
+            query_type, doc_category = "informational", "none"
 
-        # Comparison override — highest priority
-        if any(sig in q_lower for sig in COMPARISON_SIGNALS):
-            query_type   = "retrieval"
-            doc_category = "comparison"
-            print(f"[Parser] Comparison signal detected → doc_category=comparison")
-
-        # Product/internal signal override
-        elif query_type != "retrieval" and any(sig in q_lower for sig in PRODUCT_SIGNALS):
-            print(f"[Parser] Product signal → overriding {query_type} to retrieval")
+        else:  # work_query
             query_type = "retrieval"
+            if needs_live and needs_internal:
+                doc_category = "comparison"   # needs both web + DB
+            elif needs_live and not needs_internal:
+                doc_category = "live"         # price, stock, competitor
+            elif needs_internal and not needs_live:
+                doc_category = "internal"     # SOPs, policy, stable specs
+            else:
+                doc_category = "general"
 
-        print(f"[Parser] type={query_type} | category={doc_category} | topic={topic!r}")
-        return {"query_type": query_type, "doc_category": doc_category, "topic": topic}
+        print(f"[Parser] conv={conv_type} | live={needs_live} | "
+              f"internal={needs_internal} | → {query_type}/{doc_category}")
+
+        return {
+            "query_type":   query_type,
+            "doc_category": doc_category,
+            "topic":        topic,
+            "needs_live":   needs_live,
+            "needs_internal": needs_internal,
+        }
 
     except Exception as e:
-        print(f"[Parser] Failed ({e}) — defaulting to retrieval")
-        return {"query_type": "retrieval", "doc_category": "general", "topic": ""}
+        print(f"[Parser] Failed ({e}) — defaulting to retrieval/general")
+        return {
+            "query_type":     "retrieval",
+            "doc_category":   "general",
+            "topic":          "",
+            "needs_live":     True,
+            "needs_internal": True,
+        }
 
 
 # =============================================================================
@@ -329,25 +342,22 @@ def retrieve_from_db(
     allowed_categories = ROLE_CATEGORY_ALLOW.get(role) if role else None
     pinecone_filter    = {}
 
-    if doc_category == "comparison":
-        # Pull product chunks from both items being compared
+# Build Pinecone filter based on new doc_category values
+    if doc_category in ("comparison", "live"):
+        # Live/competitor queries → product chunks only
         pinecone_filter = {"doc_category": {"$eq": "product"}}
-    elif doc_category and doc_category != "general":
-        if allowed_categories and doc_category not in allowed_categories:
-            print(f"[Retrieval] Role '{role}' blocked '{doc_category}' — using role filter")
-            pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
-        else:
-            pinecone_filter = {"doc_category": {"$eq": doc_category}}
-    elif allowed_categories and role == "sales":
-        pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
 
-    results = index.query(
-        vector=embedding,
-        top_k=top_k,
-        include_metadata=True,
-        filter=pinecone_filter if pinecone_filter else None,
-    )
-    matches = results.get("matches", [])
+    elif doc_category == "internal":
+        # Stable internal docs → pull policy/sop/training/product
+        allowed = ["policy", "sop", "training", "product", "faq"]
+        if role == "sales":
+            allowed = ["product", "faq", "pricing"]
+        pinecone_filter = {"doc_category": {"$in": allowed}}
+
+    elif doc_category == "general":
+        allowed_categories = ROLE_CATEGORY_ALLOW.get(role) if role else None
+        if allowed_categories:
+            pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
 
     # Fallback: if filter too narrow, retry without filter
     if len(matches) < 2 and pinecone_filter:
@@ -439,7 +449,7 @@ CRITICAL RULES:
 - Do NOT hallucinate product names, prices, or specs
 - If information is missing say: 'I don't have that detail in our internal docs.'
 
-STYLE: Professional, concise, point-wise. Plain text only.
+STYLE: Professional, Brief, concise, and point-wise. Plain text only. Use bullet points. Max 5 points. No long paragraphs.
 COMPANY RULE: Never portray the company negatively."""
 
 
@@ -477,7 +487,8 @@ Rules:
 4. Never invent product details, prices, or colors.
 5. Never speak negatively about The Sleep Company.
 6. For comparisons: compare design, comfort (SmartGRID), size, features,
-   price range, suitability. Be balanced. Mention sources."""
+   price range, suitability. Be balanced. Mention sources.
+7. Brief and concise. Use bullet points. Max 5 points. No long paragraphs."""
 
 
 def search_with_gemini(user_query: str, db_context: str = "") -> dict:
@@ -621,42 +632,49 @@ def smart_merge(
     groq_answer:   str,
     gemini_result: dict,
 ) -> tuple[str, dict]:
-    """
-    Deterministically merges DB and Gemini answers based on query category.
-    Returns (final_answer, sources_dict).
-    """
+
     gemini_answer = gemini_result.get("answer", "")
     web_sources   = gemini_result.get("web_sources", [])
     db_sources    = [c.get("text", "") for c in db_chunks]
-    strong_count  = count_strong(db_chunks)
 
-    # ── COMPARISON queries ────────────────────────────────────────────────────
-    # Gemini searched the web and has the most complete picture.
-    # Groq/DB is not used as primary; DB context was already given to Gemini.
+    PRICE_DISCLAIMER = (
+        "\n\n⚠️ *Prices are subject to change. Always confirm on "
+        "[thesleepcompany.in](https://thesleepcompany.in) "
+        "or with your manager before quoting to a customer.*"
+    )
+
+    # ── LIVE (price / stock / availability / competitor) ─────────────────────
+    # Never trust DB. Gemini + disclaimer only.
+    if doc_category == "live":
+        print("[Merge] Strategy: LIVE → Gemini only, no DB")
+        if gemini_answer:
+            final = gemini_answer + PRICE_DISCLAIMER
+        else:
+            final = (
+                "Please check the latest pricing and availability directly on "
+                "https://thesleepcompany.in or confirm with your manager."
+            )
+        return final, {"db_sources": [], "web_sources": web_sources}
+
+    # ── COMPARISON (needs both live web + internal specs) ────────────────────
     if doc_category == "comparison":
         print("[Merge] Strategy: COMPARISON → Gemini primary")
-        if not gemini_answer:
-            # Gemini failed entirely
-            final = (
-                "I couldn't retrieve a live comparison right now. "
-                "Please visit https://thesleepcompany.in or contact the sales team."
-            )
-        else:
-            final = gemini_answer
+        final = gemini_answer or (
+            "I couldn't retrieve a live comparison right now. "
+            "Please visit https://thesleepcompany.in or contact the sales team."
+        )
         return final, {"db_sources": db_sources, "web_sources": web_sources}
 
-    # ── INTERNAL queries (policy, sop, training) ──────────────────────────────
-    # DB/Groq is authoritative. Gemini supplements only if it adds new info.
-    if doc_category in INTERNAL_CATEGORIES:
-        print(f"[Merge] Strategy: INTERNAL ({doc_category}) → Groq primary")
+    # ── INTERNAL (SOPs, policy, training, stable specs) ──────────────────────
+    # DB/Groq is authoritative. Gemini only supplements.
+    if doc_category == "internal":
+        print("[Merge] Strategy: INTERNAL → Groq primary")
         if not groq_answer:
-            # DB had nothing; fall back to Gemini
             final = gemini_answer or (
                 "I don't have that information in our internal documents. "
                 "Please contact the relevant team."
             )
-        elif gemini_answer and gemini_answer.strip() and len(gemini_answer) > 80:
-            # Gemini found supplementary public info — append it
+        elif gemini_answer and len(gemini_answer) > 80:
             final = (
                 f"{groq_answer}\n\n"
                 f"**Additional context (public sources):**\n{gemini_answer}"
@@ -665,17 +683,11 @@ def smart_merge(
             final = groq_answer
         return final, {"db_sources": db_sources, "web_sources": web_sources}
 
-    # ── PRODUCT / PRICING / FAQ / GENERAL ────────────────────────────────────
-    # Gemini is primary (live product data, colors, prices).
-    # If Gemini failed, fall back to Groq only if DB was strong.
-    print(f"[Merge] Strategy: PRODUCT/GENERAL → Gemini primary")
-
-    # ── PRODUCT / PRICING / FAQ / GENERAL ────────────────────────────────────
+    # ── GENERAL fallback ─────────────────────────────────────────────────────
+    print("[Merge] Strategy: GENERAL → Gemini primary")
     if gemini_answer:
         final = gemini_answer
     else:
-        # Gemini returned empty — retry with pure web search, no DB context
-        print("[Merge] Gemini empty → retrying with pure web search")
         retry = search_with_gemini(user_query, db_context="")
         final = retry.get("answer") or (
             "I couldn't retrieve that right now. "
@@ -832,9 +844,9 @@ def process_query(
         return answer, {"db_sources": [], "web_sources": []}
 
     if query_type == "informational":
-        print("[Pipeline] Informational — Groq only")
+        print("[Pipeline] Informational — Groq only, no retrieval")
         answer = query_groq(
-            f"Answer concisely:\n{user_query}",
+            f"Answer concisely. This is NOT related to The Sleep Company:\n{user_query}",
             model="llama-3.1-8b-instant",
         )
         return answer, {"db_sources": [], "web_sources": []}
