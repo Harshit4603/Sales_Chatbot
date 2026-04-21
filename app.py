@@ -344,11 +344,9 @@ def retrieve_from_db(
 
 # Build Pinecone filter based on new doc_category values
     if doc_category in ("comparison", "live"):
-        # Live/competitor queries → product chunks only
         pinecone_filter = {"doc_category": {"$eq": "product"}}
 
     elif doc_category == "internal":
-        # Stable internal docs → pull policy/sop/training/product
         allowed = ["policy", "sop", "training", "product", "faq"]
         if role == "sales":
             allowed = ["product", "faq", "pricing"]
@@ -358,6 +356,17 @@ def retrieve_from_db(
         allowed_categories = ROLE_CATEGORY_ALLOW.get(role) if role else None
         if allowed_categories:
             pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
+
+    else:
+        pinecone_filter = {}  # ← this was missing
+
+    results = index.query(
+        vector=embedding,
+        top_k=top_k,
+        include_metadata=True,
+        filter=pinecone_filter if pinecone_filter else None,
+    )
+    matches = results.get("matches", [])  # ← now always reached
 
     # Fallback: if filter too narrow, retry without filter
     if len(matches) < 2 and pinecone_filter:
