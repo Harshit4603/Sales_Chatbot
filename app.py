@@ -215,23 +215,57 @@ User query: {user_query}"""
 # STEP 2 — QUERY REWRITER
 # =============================================================================
 
-def rewrite_query(user_query: str, memory_block: str) -> str:
-    """Resolves pronouns and follow-up references before hitting Pinecone."""
-    if not memory_block:
+def rewrite_query(user_query: str, memory_block: str, parsed: dict) -> str:
+    """Resolves pronouns and rewrites query based on route type."""
+    
+    query_type   = parsed.get("query_type")
+    doc_category = parsed.get("doc_category")
+    needs_live   = parsed.get("needs_live")
+    needs_internal = parsed.get("needs_internal")
+
+    # ── Branch 1: Conversational — no rewrite needed ─────────────────────────
+    if query_type in ("conversational", "informational"):
         return user_query
 
-    prompt = f"""Rewrite the user's question as a fully self-contained search query.
-Resolve any pronouns or references using the conversation history.
-Return ONLY the rewritten query as a single sentence.
+    # ── Branch 2: Live only (price/stock/competitor) ──────────────────────────
+    if needs_live and not needs_internal:
+        if not memory_block:
+            return user_query
+        prompt = f"""Rewrite as a web search query for The Sleep Company's website.
+Resolve pronouns using history. Be specific about product name and what is being asked.
+Return ONLY the rewritten query.
 
-Conversation history:
-{memory_block}
+History: {memory_block}
+Query: {user_query}
+Rewritten:"""
 
-User question: {user_query}
-Rewritten query:"""
+    # ── Branch 3: Internal only (SOPs, policy, stable specs) ─────────────────
+    elif needs_internal and not needs_live:
+        if not memory_block:
+            return user_query
+        prompt = f"""Rewrite as a precise internal document search query.
+Resolve pronouns using history. Include product/policy name and specific attribute.
+Return ONLY the rewritten query.
+
+History: {memory_block}
+Query: {user_query}
+Rewritten:"""
+
+    # ── Branch 4: Both live + internal (comparison/mixed) ────────────────────
+    else:
+        if not memory_block:
+            return user_query
+        prompt = f"""Rewrite as a fully self-contained query covering both
+product specs and live details (price/availability).
+Resolve pronouns using history. Be explicit about both products if comparing.
+Return ONLY the rewritten query.
+
+History: {memory_block}
+Query: {user_query}
+Rewritten:"""
 
     try:
-        resp      = groq_client.chat.completions.create(
+        resp = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
@@ -456,7 +490,9 @@ Your role:
 CRITICAL RULES:
 - Use ONLY the provided context
 - Do NOT hallucinate product names, prices, or specs
-- If information is missing say: 'I don't have that detail in our internal docs.'
+- If you have partial information, present what you know directly without disclaimers.
+- Only if you have NO information at all, say: 'I don't have that detail in our internal docs.'
+- Never prefix your answer with what you don't know. Lead with what you do know.'
 
 STYLE: Professional, Brief, concise, and point-wise. Plain text only. Use bullet points. Max 5 points. No long paragraphs.
 COMPANY RULE: Never portray the company negatively."""
@@ -734,7 +770,7 @@ async def parallel_retrieve_and_answer_async(
     doc_category = parsed["doc_category"]
     topic        = parsed["topic"]
 
-    retrieval_query = rewrite_query(user_query, memory_block)
+    retrieval_query = rewrite_query(user_query, memory_block, parsed)
 
     # ── Phase 1: DB retrieval (always needed) ────────────────────────────────
     db_chunks  = await fetch_db_async(retrieval_query, doc_category, topic, role)
