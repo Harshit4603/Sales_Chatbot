@@ -141,6 +141,7 @@ Analyze the user query across THREE independent dimensions:
    - product features, dimensions, materials, care instructions
    false if answer is stable:
    - company policies, SOPs, training docs, FAQs
+   - product features, dimensions, materials, care instructions if there internal docs (not just web)
 
 2. NEEDS_INTERNAL_DOCS (true/false)
    true if answer lives in company documents:
