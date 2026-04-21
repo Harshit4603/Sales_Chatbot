@@ -95,12 +95,12 @@ def extract_docx(filepath: str) -> list[dict]:
     """
     doc          = Document(filepath)
     source       = os.path.basename(filepath)
-    doc_category = infer_doc_category(source)
+    doc_category = infer_doc_category(os.path.basename(filepath))
     sections     = []
 
     # Use filename (without extension) as the default heading for content
     # before the first document heading
-    current_heading = os.path.splitext(source)[0]
+    current_heading = os.path.splitext(os.path.basename(source))[0]
     current_lines   = []
 
     def flush():

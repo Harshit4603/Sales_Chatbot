@@ -1085,9 +1085,11 @@ async def admin_ingest(file: UploadFile = File(...)):
         elif ext == ".pptx":
             sections = extract_pptx(tmp_path)
 
-        # Fix source name to use original filename not temp path
+        # Fix source and doc_category using original filename
+        correct_category = infer_doc_category(file.filename)
         for s in sections:
             s["source"] = file.filename
+            s["doc_category"] = correct_category
 
         if not sections:
             raise HTTPException(status_code=400, detail="No content extracted from file")
