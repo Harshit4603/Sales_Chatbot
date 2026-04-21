@@ -445,7 +445,17 @@ def retrieve_from_db(
 ) -> list[dict]:
 
     # Use product embedding context for sales_assist (best semantic match)
-    embed_category = "product" if doc_category == "sales_assist" else doc_category
+    embed_category = "product" if doc_category in ("sales_assist", "live") else doc_category
+    if not embed_category or embed_category == "none":
+        embed_category = "general"
+
+    embed_text = build_query_embed_text(user_query, embed_category, topic)
+
+    try:
+        embedding = get_embedding_with_retry(embed_text)
+    except Exception as e:
+        print(f"[Retrieval] Embedding failed: {e}")
+        return []
     if doc_category in ("internal", "sales_assist"):
         hyde_text  = generate_hypothetical_answer(user_query, doc_category)
         embed_text = build_query_embed_text(hyde_text, embed_category, topic)
