@@ -27,3 +27,8 @@ requests
 # Others
 python-dotenv
 python-multipart              # if using forms
+
+#Ingest
+python-docx
+pdfplumber
+python-pptx
