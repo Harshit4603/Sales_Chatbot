@@ -337,7 +337,7 @@ def handle_conversational(user_query: str, memory_block: str = "") -> str:
     if not memory_block:
         prompt = f"""You are a friendly assistant for 'The Sleep Company'.
 Respond warmly and naturally to the greeting in 1-2 sentences.
-Mention you are there for assistance.
+Mention you are there for assistance. Do NOT mention products, SOPs, or policies unless the user asks.
 Just greet back and offer to help.
 User message: {user_query}"""
     else:
