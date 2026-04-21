@@ -16,6 +16,16 @@ from google.genai import types
 
 from database import get_db
 from models import ChatSession, ChatMessage, Employee, get_ist
+from fastapi import File, UploadFile
+import tempfile
+import shutil
+
+# import ingest functions
+from ingest import (
+    extract_docx, extract_pdf, extract_pptx,
+    chunk_all_sections, embed_all, upload_to_pinecone,
+    infer_doc_category
+)
 
 load_dotenv()
 
@@ -909,6 +919,71 @@ def process_query(
 # =============================================================================
 # API ENDPOINTS
 # =============================================================================
+
+@app.post("/admin/ingest")
+async def admin_ingest(file: UploadFile = File(...)):
+    # 1. Validate file type
+    allowed = [".pdf", ".docx", ".pptx"]
+    ext     = os.path.splitext(file.filename)[-1].lower()
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+
+    # 2. Save uploaded file to temp location
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+
+    try:
+        # 3. Delete existing vectors for this file from Pinecone
+        print(f"[Ingest] Deleting existing vectors for: {file.filename}")
+        try:
+            index.delete(filter={"source": {"$eq": file.filename}})
+            print(f"[Ingest] ✅ Old vectors deleted")
+        except Exception as e:
+            print(f"[Ingest] No existing vectors found or delete failed: {e}")
+
+        # 4. Extract sections based on file type
+        if ext == ".docx":
+            sections = extract_docx(tmp_path)
+        elif ext == ".pdf":
+            sections = extract_pdf(tmp_path)
+        elif ext == ".pptx":
+            sections = extract_pptx(tmp_path)
+
+        # Fix source name to use original filename not temp path
+        for s in sections:
+            s["source"] = file.filename
+
+        if not sections:
+            raise HTTPException(status_code=400, detail="No content extracted from file")
+
+        # 5. Chunk → Embed → Upsert
+        print(f"[Ingest] {len(sections)} sections extracted")
+        texts, metadatas = chunk_all_sections(sections)
+
+        print(f"[Ingest] {len(texts)} chunks — embedding now...")
+        embeddings = embed_all(texts, metadatas)
+
+        print(f"[Ingest] Uploading to Pinecone...")
+        upload_to_pinecone(embeddings, metadatas)
+
+        return {
+            "status":   "success",
+            "file":     file.filename,
+            "sections": len(sections),
+            "chunks":   len(texts),
+            "category": metadatas[0]["doc_category"] if metadatas else "unknown"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Ingest] Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        # Always clean up temp file
+        os.unlink(tmp_path)
 
 @app.get("/")
 def root():
