@@ -626,7 +626,7 @@ def search_with_gemini(user_query: str, db_context: str = "") -> dict:
     )
     return {
         "answer": (fallback or "Please visit https://thesleepcompany.in for the latest info.")
-                  + "\n\n_(Search service temporarily busy — please verify details online.)_",
+                  ,
         "web_sources": [],
     }
 
