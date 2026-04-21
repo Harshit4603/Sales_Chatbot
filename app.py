@@ -4,6 +4,7 @@ import json
 import asyncio
 import requests
 from dotenv import load_dotenv
+import re
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -199,12 +200,16 @@ User query: {user_query}"""
 
     try:
         resp = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=120,
-        )
-        raw    = resp.choices[0].message.content.strip()
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=200,
+        response_format={"type": "json_object"}
+    )
+        raw = resp.choices[0].message.content.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        raw = match.group() if match else raw
         parsed = json.loads(raw)
 
         gibberish      = bool(parsed.get("gibberish", False))
@@ -321,6 +326,7 @@ Rewritten:"""
             max_tokens=60,
         )
         rewritten = resp.choices[0].message.content.strip()
+        rewritten = rewritten.replace("```", "").strip()
         if rewritten and rewritten != user_query:
             print(f"[Rewriter] '{user_query}' → '{rewritten}'")
         return rewritten
@@ -997,11 +1003,15 @@ Example: ["What is the warranty period?", "Is it available in white?", "What's t
 
     try:
         resp = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-        )
-        raw         = resp.choices[0].message.content.strip()
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+        response_format={"type": "json_object"}
+    )
+        raw = resp.choices[0].message.content.strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        raw = match.group() if match else raw
         suggestions = json.loads(raw)
         return suggestions if isinstance(suggestions, list) else []
     except Exception as e:
