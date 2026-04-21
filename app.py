@@ -129,36 +129,70 @@ ROLE_CATEGORY_ALLOW = {
 # =============================================================================
 
 def parse_query(user_query: str) -> dict:
-    prompt = f"""You are a query analyzer for 'The Sleep Company' assistant.
+    prompt = f"""You are a query router for 'The Sleep Company' internal sales assistant.
+The Sleep Company sells: sofas, mattresses, pillows, recliners, beds, bed frames.
+Employees are sales reps and staff who help customers and manage operations.
 
-Analyze the user query across THREE independent dimensions:
+Analyze the query level by level. Stop at first match.
 
-1. NEEDS_LIVE_DATA (true/false)
-   true if answer could change week-to-week:
-   - prices, offers, discounts, EMI, availability, stock
-   - competitor comparisons, new launches, "vs", "better than"
-   - colors, variants, shades — these change with new launches
-   - product features, dimensions, materials, care instructions
-   false if answer is stable:
-   - company policies, SOPs, training docs, FAQs
-   - product features, dimensions, materials, care instructions if there internal docs (not just web)
+═══════════════════════════════════════════════════════
+LEVEL 1 — SENSIBILITY
+═══════════════════════════════════════════════════════
+Is the query gibberish?
+- Random characters: "asdfgh", "123abc!!!"
+- Completely incoherent: "blue the if running potato"
+- Empty or meaningless noise
+→ If yes: set gibberish=true, stop here.
+→ Everything else including broken English, vague or weird questions = sensible
 
-2. NEEDS_INTERNAL_DOCS (true/false)
-   true if answer lives in company documents:
-   - product specs, SOPs, HR policy, training, FAQs
-   false if it's general conversation or world knowledge
+═══════════════════════════════════════════════════════
+LEVEL 2 — INTENT
+═══════════════════════════════════════════════════════
+Only two outcomes:
+- chit_chat: pure greetings, small talk, thanks, bye
+  Examples: "Hi!", "Good morning", "Thanks", "You're helpful"
+- work_query: EVERYTHING else
+  ⚠️ Any query a sales rep or customer could meaningfully ask = work_query
+  ⚠️ When in doubt → always work_query
 
-3. CONVERSATION_TYPE
-   - "chit_chat"       → greetings, small talk, "what can you do?"
-   - "world_knowledge" → zero connection to sleep/furniture/company
-   - "work_query"      → anything about products, company, operations
+═══════════════════════════════════════════════════════
+LEVEL 3 — DATA SOURCE (only for work_query)
+Answer each question independently with yes/no.
+═══════════════════════════════════════════════════════
+INTERNAL questions (any yes → needs_internal=true):
+  I1. Does answering require stable product knowledge?
+      (specs, dimensions, materials, technology, warranty)
+  I2. Does answering require company procedures?
+      (SOPs, return process, escalation, complaint handling)
+  I3. Does answering require HR or company policy?
+      (leave, attendance, conduct, onboarding, training)
+  I4. Does answering require product catalog knowledge?
+      (what products exist, configurations, series, variants)
+  I5. Does answering require a recommendation from company offerings?
+      (best product for a need, use case, room size, body type)
 
-Return ONLY valid JSON, no explanation:
+LIVE questions (any yes → needs_live=true):
+  L1. Does answering require current pricing, EMI, or offers?
+  L2. Does answering require current colors, variants, or stock?
+  L3. Does answering require competitor or market information?
+  L4. Could the answer change week-to-week or month-to-month?
+  L5. Would a live web search give a significantly better answer?
+
+═══════════════════════════════════════════════════════
+LEVEL 4 — COMBINATION (only when both are true)
+═══════════════════════════════════════════════════════
+→ doc_category = sales_assist
+   Both DB and web search will run. No further split needed.
+
+═══════════════════════════════════════════════════════
+OUTPUT — return ONLY this JSON, no explanation:
+═══════════════════════════════════════════════════════
 {{
-  "needs_live_data": true | false,
+  "gibberish":           true | false,
+  "conversation_type":   "chit_chat" | "work_query",
   "needs_internal_docs": true | false,
-  "conversation_type": "chit_chat" | "world_knowledge" | "work_query",
-  "topic": "<max 6 words, empty string for chit_chat/world_knowledge>"
+  "needs_live_data":     true | false,
+  "topic": "<max 6 words, empty string if chit_chat or gibberish>"
 }}
 
 User query: {user_query}"""
@@ -168,57 +202,60 @@ User query: {user_query}"""
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=100,
+            max_tokens=120,
         )
         raw    = resp.choices[0].message.content.strip()
         parsed = json.loads(raw)
 
+        gibberish      = bool(parsed.get("gibberish", False))
+        conv_type      = parsed.get("conversation_type", "work_query")
         needs_live     = bool(parsed.get("needs_live_data", False))
         needs_internal = bool(parsed.get("needs_internal_docs", True))
-        conv_type      = parsed.get("conversation_type", "work_query")
         topic          = parsed.get("topic", "")
 
-        if conv_type not in {"chit_chat", "world_knowledge", "work_query"}:
-            conv_type = "work_query"
         if not isinstance(topic, str):
             topic = ""
+        if conv_type not in {"chit_chat", "work_query"}:
+            conv_type = "work_query"
 
-        # Derive query_type and doc_category deterministically
-        if conv_type == "chit_chat":
+        # ── Routing logic ─────────────────────────────────────────────────────
+        if gibberish:
+            query_type, doc_category = "gibberish", "none"
+
+        elif conv_type == "chit_chat":
             query_type, doc_category = "conversational", "none"
-
-        elif conv_type == "world_knowledge":
-            query_type, doc_category = "informational", "none"
 
         else:  # work_query
             query_type = "retrieval"
             if needs_live and needs_internal:
-                doc_category = "comparison"   # needs both web + DB
-            elif needs_live and not needs_internal:
-                doc_category = "live"         # price, stock, competitor
-            elif needs_internal and not needs_live:
-                doc_category = "internal"     # SOPs, policy, stable specs
+                doc_category = "sales_assist"
+            elif needs_live:
+                doc_category = "live"
+            elif needs_internal:
+                doc_category = "internal"
             else:
-                doc_category = "general"
+                # Both false — LLM unsure, safe default
+                doc_category = "internal"
 
-        print(f"[Parser] conv={conv_type} | live={needs_live} | "
-              f"internal={needs_internal} | → {query_type}/{doc_category}")
+        print(f"[Parser] gibberish={gibberish} | conv={conv_type} | "
+              f"live={needs_live} | internal={needs_internal} | "
+              f"→ {query_type}/{doc_category}")
 
         return {
-            "query_type":   query_type,
-            "doc_category": doc_category,
-            "topic":        topic,
-            "needs_live":   needs_live,
+            "query_type":     query_type,
+            "doc_category":   doc_category,
+            "topic":          topic,
+            "needs_live":     needs_live,
             "needs_internal": needs_internal,
         }
 
     except Exception as e:
-        print(f"[Parser] Failed ({e}) — defaulting to retrieval/general")
+        print(f"[Parser] Failed ({e}) — defaulting to retrieval/internal")
         return {
             "query_type":     "retrieval",
-            "doc_category":   "general",
+            "doc_category":   "internal",
             "topic":          "",
-            "needs_live":     True,
+            "needs_live":     False,
             "needs_internal": True,
         }
 
@@ -380,31 +417,39 @@ def retrieve_from_db(
     role:         str | None = None,
     top_k:        int = SOURCES_ACCESSED,
 ) -> list[dict]:
-    # Use "product" embedding context for comparisons (best semantic match)
-    embed_category = "product" if doc_category == "comparison" else doc_category
+
+    # Use product embedding context for sales_assist (best semantic match)
+    embed_category = "product" if doc_category == "sales_assist" else doc_category
     embed_text     = build_query_embed_text(user_query, embed_category, topic)
     embedding      = get_embedding_with_retry(embed_text)
 
     allowed_categories = ROLE_CATEGORY_ALLOW.get(role) if role else None
     pinecone_filter    = {}
 
-# Build Pinecone filter based on new doc_category values
-    if doc_category in ("comparison", "live"):
-        pinecone_filter = {"doc_category": {"$eq": "product"}}
-
-    elif doc_category == "internal":
-        allowed = ["policy", "sop", "training", "product", "faq"]
+    # ── Build Pinecone filter ─────────────────────────────────────────────────
+    if doc_category == "sales_assist":
+        # Needs both product + internal docs
+        allowed = ["product", "pricing", "faq", "policy", "sop", "training"]
         if role == "sales":
-            allowed = ["product", "faq", "pricing"]
+            allowed = ["product", "pricing", "faq"]
         pinecone_filter = {"doc_category": {"$in": allowed}}
 
-    elif doc_category == "general":
-        allowed_categories = ROLE_CATEGORY_ALLOW.get(role) if role else None
-        if allowed_categories:
-            pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
+    elif doc_category == "internal":
+        allowed = ["product", "policy", "sop", "training", "faq"]
+        if role == "sales":
+            allowed = ["product", "faq"]
+        pinecone_filter = {"doc_category": {"$in": allowed}}
+
+    elif doc_category == "live":
+        # Live queries don't hit DB meaningfully
+        # but if they do fallback, pull product chunks
+        pinecone_filter = {"doc_category": {"$eq": "product"}}
+
+    elif allowed_categories:
+        pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
 
     else:
-        pinecone_filter = {}  # ← this was missing
+        pinecone_filter = {}
 
     results = index.query(
         vector=embedding,
@@ -412,7 +457,7 @@ def retrieve_from_db(
         include_metadata=True,
         filter=pinecone_filter if pinecone_filter else None,
     )
-    matches = results.get("matches", [])  # ← now always reached
+    matches = results.get("matches", [])
 
     # Fallback: if filter too narrow, retry without filter
     if len(matches) < 2 and pinecone_filter:
@@ -704,10 +749,9 @@ def smart_merge(
         "or with your manager before quoting to a customer.*"
     )
 
-    # ── LIVE (price / stock / availability / competitor) ─────────────────────
-    # Never trust DB. Gemini + disclaimer only.
+    # ── LIVE ─────────────────────────────────────────────────────────────────
     if doc_category == "live":
-        print("[Merge] Strategy: LIVE → Gemini only, no DB")
+        print("[Merge] Strategy: LIVE → Gemini only")
         if gemini_answer:
             final = gemini_answer + PRICE_DISCLAIMER
         else:
@@ -717,17 +761,7 @@ def smart_merge(
             )
         return final, {"db_sources": [], "web_sources": web_sources}
 
-    # ── COMPARISON (needs both live web + internal specs) ────────────────────
-    if doc_category == "comparison":
-        print("[Merge] Strategy: COMPARISON → Gemini primary")
-        final = gemini_answer or (
-            "I couldn't retrieve a live comparison right now. "
-            "Please visit https://thesleepcompany.in or contact the sales team."
-        )
-        return final, {"db_sources": db_sources, "web_sources": web_sources}
-
-    # ── INTERNAL (SOPs, policy, training, stable specs) ──────────────────────
-    # DB/Groq is authoritative. Gemini only supplements.
+    # ── INTERNAL ─────────────────────────────────────────────────────────────
     if doc_category == "internal":
         print("[Merge] Strategy: INTERNAL → Groq primary")
         if not groq_answer:
@@ -735,17 +769,31 @@ def smart_merge(
                 "I don't have that information in our internal documents. "
                 "Please contact the relevant team."
             )
-        elif gemini_answer and len(gemini_answer) > 80:
-            final = (
-                f"{groq_answer}\n\n"
-                f"**Additional context (public sources):**\n{gemini_answer}"
-            )
         else:
             final = groq_answer
+        return final, {"db_sources": db_sources, "web_sources": []}
+
+    # ── SALES ASSIST (internal + live combined) ───────────────────────────────
+    if doc_category == "sales_assist":
+        print("[Merge] Strategy: SALES ASSIST → Gemini primary, DB supplements")
+        if gemini_answer and groq_answer:
+            final = (
+                f"{gemini_answer}\n\n"
+                f"**From internal docs:**\n{groq_answer}"
+            )
+        elif gemini_answer:
+            final = gemini_answer
+        elif groq_answer:
+            final = groq_answer
+        else:
+            final = (
+                "I couldn't retrieve enough information right now. "
+                "Please visit https://thesleepcompany.in or contact your manager."
+            )
         return final, {"db_sources": db_sources, "web_sources": web_sources}
 
-    # ── GENERAL fallback ─────────────────────────────────────────────────────
-    print("[Merge] Strategy: GENERAL → Gemini primary")
+    # ── GENERAL FALLBACK ─────────────────────────────────────────────────────
+    print("[Merge] Strategy: FALLBACK → Gemini primary")
     if gemini_answer:
         final = gemini_answer
     else:
@@ -785,21 +833,27 @@ async def parallel_retrieve_and_answer_async(
 
     doc_category = parsed["doc_category"]
     topic        = parsed["topic"]
+    needs_live   = parsed["needs_live"]
+    needs_internal = parsed["needs_internal"]
 
     retrieval_query = rewrite_query(user_query, memory_block, parsed)
 
-    # ── Phase 1: DB retrieval (always needed) ────────────────────────────────
-    db_chunks  = await fetch_db_async(retrieval_query, doc_category, topic, role)
-    db_context = build_context(db_chunks) if db_chunks else ""
+    # ── Phase 1: DB retrieval (only if needed) ────────────────────────────────
+    if needs_internal:
+        db_chunks  = await fetch_db_async(retrieval_query, doc_category, topic, role)
+        db_context = build_context(db_chunks) if db_chunks else ""
+    else:
+        db_chunks  = []
+        db_context = ""
 
     memory_section = (
         f"--- CONVERSATION HISTORY ---\n{memory_block}\n---\n\n"
         if memory_block else ""
     )
 
-    # ── Phase 2: Run Groq + Gemini in parallel ───────────────────────────────
-    # Groq task — only meaningful when DB has content
-    if db_chunks:
+    # ── Phase 2: Run Groq + Gemini in parallel ────────────────────────────────
+    # Groq — only if internal needed and DB has content
+    if needs_internal and db_chunks:
         groq_prompt = (
             f"{memory_section}"
             f"Use ONLY the following internal context to answer.\n"
@@ -809,20 +863,24 @@ async def parallel_retrieve_and_answer_async(
         loop      = asyncio.get_event_loop()
         groq_task = loop.run_in_executor(None, query_groq, groq_prompt)
     else:
-        groq_task = asyncio.coroutine(lambda: "")()
+        async def _empty(): return ""
+        groq_task = _empty()
 
-    # Gemini task — always runs (it has db_context for grounding)
-    gemini_task = fetch_gemini_async(user_query, db_context)
+    # Gemini — only if live needed
+    if needs_live:
+        gemini_task = fetch_gemini_async(user_query, db_context)
+    else:
+        async def _empty_dict(): return {"answer": "", "web_sources": []}
+        gemini_task = _empty_dict()
 
     # Await both
     groq_answer, gemini_result = await asyncio.gather(groq_task, gemini_task)
-
     groq_answer = groq_answer or ""
 
     print(f"[Parallel] Groq={'✅' if groq_answer else '❌'} "
           f"Gemini={'✅' if gemini_result.get('answer') else '❌'}")
 
-    # ── Phase 3: Smart merge ─────────────────────────────────────────────────
+    # ── Phase 3: Smart merge ──────────────────────────────────────────────────
     return smart_merge(
         user_query, doc_category, db_chunks, db_context, groq_answer, gemini_result
     )
@@ -899,20 +957,21 @@ def process_query(
     parsed     = parse_query(user_query)
     query_type = parsed["query_type"]
 
+    # ── GIBBERISH ─────────────────────────────────────────────────────────────
+    if query_type == "gibberish":
+        print("[Pipeline] Gibberish — short-circuiting")
+        return (
+            "I didn't quite understand that. Could you rephrase?",
+            {"db_sources": [], "web_sources": []}
+        )
+
+    # ── CONVERSATIONAL ────────────────────────────────────────────────────────
     if query_type == "conversational":
         print("[Pipeline] Conversational — short-circuiting")
         answer = handle_conversational(user_query, memory_block)
         return answer, {"db_sources": [], "web_sources": []}
 
-    if query_type == "informational":
-        print("[Pipeline] Informational — Groq only, no retrieval")
-        answer = query_groq(
-            f"Answer concisely. This is NOT related to The Sleep Company:\n{user_query}",
-            model="llama-3.1-8b-instant",
-        )
-        return answer, {"db_sources": [], "web_sources": []}
-
-    # All retrieval queries (product / comparison / policy / sop / training / …)
+    # ── RETRIEVAL (internal / live / sales_assist) ────────────────────────────
     print(f"[Pipeline] Retrieval ({parsed['doc_category']}) — parallel fetch + smart merge")
     return parallel_retrieve_and_answer(user_query, parsed, memory_block, role)
 
