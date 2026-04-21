@@ -570,7 +570,7 @@ def search_with_gemini(user_query: str, db_context: str = "") -> dict:
             config = types.GenerateContentConfig(
                 tools=[grounding_tool],
                 temperature=0.1,
-                max_output_tokens=1200,
+                max_output_tokens=2500,
                 system_instruction=GEMINI_SYSTEM_PROMPT,
             )
             response = genai_client.models.generate_content(
