@@ -336,8 +336,9 @@ Rewritten:"""
 def handle_conversational(user_query: str, memory_block: str = "") -> str:
     if not memory_block:
         prompt = f"""You are a friendly assistant for 'The Sleep Company'.
-Respond warmly in 2-3 sentences. Mention you can help with products,
-recommendations, SOPs, policies, and pricing.
+Respond warmly and naturally to the greeting in 1-2 sentences.
+Mention products, SOPs, or policies only if contextually appropriate.
+Just greet back and offer to help.
 User message: {user_query}"""
     else:
         prompt = f"""You are a helpful assistant for 'The Sleep Company'.
@@ -410,6 +411,31 @@ def get_embedding_with_retry(text: str, retries: int = 5) -> list[float]:
 # STEP 5 — PINECONE RETRIEVAL
 # =============================================================================
 
+def generate_hypothetical_answer(user_query: str, doc_category: str) -> str:
+    """Generates a hypothetical answer to improve Pinecone embedding match."""
+    prompt = f"""Generate a short hypothetical answer (3-5 sentences) that would 
+appear in a Sleep Company internal document for this query.
+Write as if you are the document, not answering the user.
+Use formal, document-like language with specific details.
+
+Query: {user_query}
+Document type: {doc_category}
+Hypothetical document excerpt:"""
+
+    try:
+        resp = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=120,
+        )
+        hypothetical = resp.choices[0].message.content.strip()
+        print(f"[HyDE] Generated: {hypothetical[:80]}...")
+        return hypothetical
+    except Exception as e:
+        print(f"[HyDE] Failed ({e}) — using original query")
+        return user_query
+
 def retrieve_from_db(
     user_query:   str,
     doc_category: str,
@@ -420,8 +446,12 @@ def retrieve_from_db(
 
     # Use product embedding context for sales_assist (best semantic match)
     embed_category = "product" if doc_category == "sales_assist" else doc_category
-    embed_text     = build_query_embed_text(user_query, embed_category, topic)
-    embedding      = get_embedding_with_retry(embed_text)
+    if doc_category in ("internal", "sales_assist"):
+        hyde_text  = generate_hypothetical_answer(user_query, doc_category)
+        embed_text = build_query_embed_text(hyde_text, embed_category, topic)
+    else:
+        embed_text = build_query_embed_text(user_query, embed_category, topic)
+        embedding      = get_embedding_with_retry(embed_text)
 
     allowed_categories = ROLE_CATEGORY_ALLOW.get(role) if role else None
     pinecone_filter    = {}
