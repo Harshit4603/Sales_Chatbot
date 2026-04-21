@@ -127,8 +127,9 @@ Analyze the user query across THREE independent dimensions:
    true if answer could change week-to-week:
    - prices, offers, discounts, EMI, availability, stock
    - competitor comparisons, new launches, "vs", "better than"
-   false if answer is stable:
+   - colors, variants, shades — these change with new launches
    - product features, dimensions, materials, care instructions
+   false if answer is stable:
    - company policies, SOPs, training docs, FAQs
 
 2. NEEDS_INTERNAL_DOCS (true/false)
@@ -494,7 +495,9 @@ CRITICAL RULES:
 - Only if you have NO information at all, say: 'I don't have that detail in our internal docs.'
 - Never prefix your answer with what you don't know. Lead with what you do know.'
 
-STYLE: Professional, Brief, concise, and point-wise. Plain text only. Use bullet points. Max 5 points. No long paragraphs.
+STYLE: Professional, Brief, concise, and point-wise. Plain text only. Answer specifically and completely. Use bullet points for lists.
+Cover all relevant details — colors, sizes, features, steps — don't truncate.
+No unnecessary preamble or filler sentences.
 COMPANY RULE: Never portray the company negatively."""
 
 
@@ -533,7 +536,9 @@ Rules:
 5. Never speak negatively about The Sleep Company.
 6. For comparisons: compare design, comfort (SmartGRID), size, features,
    price range, suitability. Be balanced. Mention sources.
-7. Brief and concise. Use bullet points. Max 5 points. No long paragraphs."""
+7. Answer specifically and completely but in brief. Use bullet points for lists.
+Cover all relevant details — colors, sizes, features, steps — don't truncate.
+No unnecessary preamble or filler sentences."""
 
 
 def search_with_gemini(user_query: str, db_context: str = "") -> dict:
