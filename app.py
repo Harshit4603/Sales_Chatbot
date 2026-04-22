@@ -824,6 +824,7 @@ Reformat this answer for a sales rep:
 - Keep tone confident, positive, sales-oriented
 - Remove any "I don't have" or negative phrases
 - Max 150 words unless comparison query
+- NOTE - your output token limit is 300. Your answer needs to be complete so sturcture accordingly.
 
 Query: {user_query}
 Raw answer: {raw_answer}
