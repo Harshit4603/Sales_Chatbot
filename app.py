@@ -802,6 +802,31 @@ async def fetch_gemini_async(user_query: str, db_context: str) -> dict:
 def count_strong(db_chunks: list[dict]) -> int:
     return sum(1 for c in db_chunks if c.get("_score", 0) >= SCORE_THRESHOLD)
 
+def format_final_answer(raw_answer: str, user_query: str) -> str:
+    prompt = f"""You are a sales assistant formatter for The Sleep Company.
+
+Reformat this answer for a sales rep:
+- Lead with direct answer to the query
+- Use bullet points only for lists of 3+ items
+- Keep tone confident, positive, sales-oriented
+- Remove any "I don't have" or negative phrases
+- Max 150 words unless comparison query
+
+Query: {user_query}
+Raw answer: {raw_answer}
+Formatted answer:"""
+
+    try:
+        resp = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=300,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[Formatter] Failed ({e}) — returning raw answer")
+        return raw_answer
 
 def smart_merge(
     user_query:    str,
@@ -832,21 +857,24 @@ def smart_merge(
                 "Please check the latest pricing and availability directly on "
                 "https://thesleepcompany.in or confirm with your manager."
             )
+        final = format_final_answer(final, user_query)
         return final, {"db_sources": [], "web_sources": web_sources}
 
     # ── INTERNAL ─────────────────────────────────────────────────────────────
     if doc_category == "internal":
         print("[Merge] Strategy: INTERNAL → Groq primary")
-        if not groq_answer:
+        if not groq_answer or "don't have" in groq_answer.lower() or "contact" in groq_answer.lower():
+            print("[Merge] Groq unhelpful → falling back to Gemini")
             final = gemini_answer or (
-                "I don't have that information in our internal documents. "
-                "Please contact the relevant team."
+                "I don't have enough information on this. "
+                "Please visit https://thesleepcompany.in"
             )
         else:
             final = groq_answer
+        final = format_final_answer(final, user_query)
         return final, {"db_sources": db_sources, "web_sources": []}
 
-    # ── SALES ASSIST (internal + live combined) ───────────────────────────────
+    # ── SALES ASSIST ──────────────────────────────────────────────────────────
     if doc_category == "sales_assist":
         print("[Merge] Strategy: SALES ASSIST → Gemini primary, DB supplements")
         if gemini_answer and groq_answer:
@@ -863,6 +891,7 @@ def smart_merge(
                 "I couldn't retrieve enough information right now. "
                 "Please visit https://thesleepcompany.in or contact your manager."
             )
+        final = format_final_answer(final, user_query)
         return final, {"db_sources": db_sources, "web_sources": web_sources}
 
     # ── GENERAL FALLBACK ─────────────────────────────────────────────────────
@@ -877,6 +906,7 @@ def smart_merge(
         )
         web_sources = retry.get("web_sources", web_sources)
 
+    final = format_final_answer(final, user_query)
     return final, {"db_sources": db_sources, "web_sources": web_sources}
 
 
