@@ -134,56 +134,70 @@ def parse_query(user_query: str) -> dict:
 The Sleep Company sells: sofas, mattresses, pillows, recliners, beds, bed frames.
 Employees are sales reps and staff who help customers and manage operations.
 
-Analyze the query level by level. Stop at first match.
+Route the query to the correct handler based on descriptions below.
 
 ═══════════════════════════════════════════════════════
-LEVEL 1 — SENSIBILITY
+HANDLER DESCRIPTIONS
 ═══════════════════════════════════════════════════════
-Is the query gibberish?
-- Random characters: "asdfgh", "123abc!!!"
-- Completely incoherent: "blue the if running potato"
-- Empty or meaningless noise
-→ If yes: set gibberish=true, stop here.
-→ Everything else including broken English, vague or weird questions = sensible
+
+GIBBERISH HANDLER:
+Receives: Random characters, incoherent text, empty noise
+Examples: "asdfgh", "123abc!!!", "blue the if running potato"
+→ Set gibberish=true
+
+CONVERSATIONAL HANDLER:
+Receives: Pure greetings, small talk, thanks, bye — no information needed
+System: Responds warmly, no data retrieval happens at all
+Examples: "Hi!", "Good morning", "Thanks", "You're helpful", "Bye"
+→ Set conversation_type=chit_chat
+
+INTERNAL HANDLER:
+Receives: Queries answerable from stable company documents
+System: Searches internal Pinecone knowledge base → Groq generates answer
+Handles:
+  - Product specs, dimensions, materials, technology, warranty
+  - SOPs, return process, escalation, complaint handling
+  - HR policies, leave, attendance, conduct, onboarding, training
+  - Product catalog, configurations, series, variants
+  - Recommendations from company offerings for a need/use case
+Examples: "Valencia sofa dimensions?", "What is SmartGRID?",
+          "Return policy for damaged sofa?", "Best mattress for back pain?"
+→ Set needs_internal_docs=true, needs_live_data=false
+
+LIVE HANDLER:
+Receives: Queries needing current real-time data from the web
+System: Gemini performs live Google Search — internal DB excluded
+Handles:
+  - Current pricing, EMI, discounts, festive offers
+  - Current colors, variants, shades, stock availability
+  - Competitor info, market data, brand comparisons
+  - Anything that changes week-to-week
+Examples: "Price of Valencia sofa?", "Colors available in SmartGRID?",
+          "Any ongoing offers?", "How does Wakefit compare in price?"
+→ Set needs_internal_docs=false, needs_live_data=true
+
+SALES ASSIST HANDLER:
+Receives: Queries needing BOTH stable internal knowledge AND live web data
+System: Pinecone DB + Gemini web search both run, results merged
+Handles:
+  - Comparisons between two products or brands
+  - Open-ended product help needing specs + live info
+  - Budget-based recommendations needing catalog + pricing
+  - Competitor objection handling needing internal specs + competitor data
+  - Any query where internal knowledge alone OR live search alone is insufficient
+Examples: "Valencia vs Luxe sofa", "Help me with Valencia sofa",
+          "Best sofa under 50k", "Customer says Wakefit is cheaper than our pillow"
+→ Set needs_internal_docs=true, needs_live_data=true
 
 ═══════════════════════════════════════════════════════
-LEVEL 2 — INTENT
+ROUTING RULES (apply in order):
 ═══════════════════════════════════════════════════════
-Only two outcomes:
-- chit_chat: PURE Greetings, small talk, thanks, bye
-  Examples: "Hi!", "Good morning", "Thanks", "You're helpful"
-- work_query: EVERYTHING else
-  ⚠️ Any query a sales rep or customer could meaningfully ask = work_query
-  ⚠️ When in doubt → always work_query
-
-═══════════════════════════════════════════════════════
-LEVEL 3 — DATA SOURCE (only for work_query)
-Answer each question independently with yes/no.
-═══════════════════════════════════════════════════════
-INTERNAL questions (any yes → needs_internal=true):
-  I1. Does answering require stable product knowledge?
-      (specs, dimensions, materials, technology, warranty)
-  I2. Does answering require company procedures?
-      (SOPs, return process, escalation, complaint handling)
-  I3. Does answering require HR or company policy?
-      (leave, attendance, conduct, onboarding, training)
-  I4. Does answering require product catalog knowledge?
-      (what products exist, configurations, series, variants)
-  I5. Does answering require a recommendation from company offerings?
-      (best product for a need, use case, room size, body type)
-
-LIVE questions (any yes → needs_live=true):
-  L1. Does answering require current pricing, EMI, or offers?
-  L2. Does answering require current colors, variants, or stock?
-  L3. Does answering require competitor or market information?
-  L4. Could the answer change week-to-week or month-to-month?
-  L5. Would a live web search give a significantly better answer?
-
-═══════════════════════════════════════════════════════
-LEVEL 4 — COMBINATION (only when both are true)
-═══════════════════════════════════════════════════════
-→ doc_category = sales_assist
-   Both DB and web search will run. No further split needed.
+1. Incoherent/random → gibberish
+2. Pure greeting/small talk → chit_chat
+3. Needs both stable knowledge + live data → sales_assist
+4. Needs only stable company knowledge → internal
+5. Needs only current/live data → live
+6. Uncertain → sales_assist (safest default, runs everything)
 
 ═══════════════════════════════════════════════════════
 OUTPUT — return ONLY this JSON, no explanation:
@@ -197,7 +211,6 @@ OUTPUT — return ONLY this JSON, no explanation:
 }}
 
 User query: {user_query}"""
-
     try:
         resp = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
