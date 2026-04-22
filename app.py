@@ -239,8 +239,10 @@ User query: {user_query}"""
             elif needs_internal:
                 doc_category = "internal"
             else:
-                # Both false — LLM unsure, safe default
-                doc_category = "internal"
+                # Both false — LLM unsure, run everything
+                doc_category = "sales_assist"
+                needs_live = True
+                needs_internal = True
 
         print(f"[Parser] gibberish={gibberish} | conv={conv_type} | "
               f"live={needs_live} | internal={needs_internal} | "
