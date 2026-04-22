@@ -259,11 +259,11 @@ User query: {user_query}"""
     except Exception as e:
         print(f"[Parser] Failed ({e}) — defaulting to retrieval/internal")
         return {
-            "query_type":     "retrieval",
-            "doc_category":   "internal",
-            "topic":          "",
-            "needs_live":     False,
-            "needs_internal": True,
+            "query_type":     query_type,
+            "doc_category":   doc_category,
+            "topic":          topic,
+            "needs_live":     needs_live,
+            "needs_internal": needs_internal,
         }
 
 
