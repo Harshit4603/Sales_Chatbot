@@ -329,7 +329,7 @@ User query: {user_query}"""
             "needs_internal": needs_internal,
         }
 
-       except Exception as e:
+    except Exception as e:
         print(f"[Parser] Failed ({e}) — defaulting to retrieval/sales_assist")
         return {
             "query_type":     "retrieval",
@@ -360,37 +360,65 @@ def rewrite_query(user_query: str, memory_block: str, parsed: dict) -> str:
     if needs_live and not needs_internal:
         if not memory_block:
             return user_query
-        prompt = f"""Rewrite as a web search query for The Sleep Company's website.
-Resolve pronouns using history. Be specific about product name and what is being asked.
+        prompt = f"""Rewrite the query into a clear, self-contained query.
+
+IMPORTANT RULES:
+- Conversation history is ordered from oldest → latest
+- The LAST turn is the most recent and most important
+- Prefer resolving references using the latest turn unless user clearly refers to earlier context
+- Words like "this", "that", "it", "those" should refer to the most recent relevant entity
+
+Be specific about product/policy name and user intent.
 Return ONLY the rewritten query.
 
-History: {memory_block}
+History:
+{memory_block}
+
 Query: {user_query}
+
 Rewritten:"""
 
     # ── Branch 3: Internal only (SOPs, policy, stable specs) ─────────────────
     elif needs_internal and not needs_live:
         if not memory_block:
             return user_query
-        prompt = f"""Rewrite as a precise internal document search query.
-Resolve pronouns using history. Include product/policy name and specific attribute.
+        prompt = f"""Rewrite the query into a clear, self-contained query.
+
+IMPORTANT RULES:
+- Conversation history is ordered from oldest → latest
+- The LAST turn is the most recent and most important
+- Prefer resolving references using the latest turn unless user clearly refers to earlier context
+- Words like "this", "that", "it", "those" should refer to the most recent relevant entity
+
+Be specific about product/policy name and user intent.
 Return ONLY the rewritten query.
 
-History: {memory_block}
-Query: {user_query}
-Rewritten:"""
+History:
+{memory_block}
 
+Query: {user_query}
+
+Rewritten:"""
     # ── Branch 4: Both live + internal (comparison/mixed) ────────────────────
     else:
         if not memory_block:
             return user_query
-        prompt = f"""Rewrite as a fully self-contained query covering both
-product specs and live details (price/availability).
-Resolve pronouns using history. Be explicit about both products if comparing.
+        prompt = f"""Rewrite the query into a clear, self-contained query.
+
+IMPORTANT RULES:
+- Conversation history is ordered from oldest → latest
+- The LAST turn is the most recent and most important
+- Prefer resolving references using the latest turn unless user clearly refers to earlier context
+- Words like "this", "that", "it", "those" should refer to the most recent relevant entity
+
+Be specific about product/policy name and user intent.
 Return ONLY the rewritten query.
 
-History: {memory_block}
+History:
+{memory_block}
+
 Query: {user_query}
+
 Rewritten:"""
 
     try:
@@ -643,16 +671,32 @@ def build_memory_block(session_id: str, db: Session) -> str:
     if not past:
         return ""
 
-    past  = list(reversed(past))
+    past = list(reversed(past))  # oldest → newest
+
+    memory_header = """
+Conversation history (ordered from oldest → latest).
+The LAST turn is the most recent and should be given highest importance.
+Always resolve references like "this", "that", "it" using the most recent relevant turn unless clearly stated otherwise.
+"""
+
     lines = []
-    for msg in past:
-        lines.append(f"Previous Question: {msg.query}")
-        lines.append(f"Previous Answer: {msg.answer}")
+
+    for i, msg in enumerate(past, start=1):
+        is_latest = i == len(past)
+
+        lines.append(
+            f"Turn {i}{' (MOST RECENT)' if is_latest else ''} | Time: {msg.timestamp}"
+        )
+        if is_latest:
+            lines.append("↑ THIS IS THE MOST RECENT CONTEXT — PRIORITISE THIS")
+
+        lines.append(f"User: {msg.query}")
+        lines.append(f"Assistant: {msg.answer}")
+        lines.append("---")
 
     print(f"[Memory] {len(past)} turn(s) loaded")
-    return "\n".join(lines)
 
-
+    return memory_header + "\n" + "\n".join(lines)
 # =============================================================================
 # STEP 8 — GROQ LLM (internal-doc-grounded answers)
 # =============================================================================
