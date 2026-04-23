@@ -132,9 +132,10 @@ def detect_and_translate(user_query: str) -> dict:
 Query: {user_query}
 
 Rules:
-- If English → return as is
-- If Hinglish (Hindi+English mix) → return as is, it is supported natively
-- If any other language (Marathi, Tamil, Telugu, Gujarati, Kannada, Bengali etc.) → translate to English
+- If English → return as is, set needs_translation=false
+- If Hinglish (Hindi+English mix) → translate to English, set needs_translation=true, set original_language=hinglish
+- If any other language (Marathi, Tamil, Telugu, Gujarati, Kannada, Bengali etc.) → translate to English, set needs_translation=true
+- Always provide English translation in translated_query field
 - Always identify the original language
 
 Return ONLY valid JSON:
