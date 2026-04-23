@@ -329,15 +329,15 @@ User query: {user_query}"""
             "needs_internal": needs_internal,
         }
 
-   except Exception as e:
-    print(f"[Parser] Failed ({e}) — defaulting to retrieval/sales_assist")
-    return {
-        "query_type":     "retrieval",
-        "doc_category":   "sales_assist",
-        "topic":          "",
-        "needs_live":     True,
-        "needs_internal": True,
-    }
+       except Exception as e:
+        print(f"[Parser] Failed ({e}) — defaulting to retrieval/sales_assist")
+        return {
+            "query_type":     "retrieval",
+            "doc_category":   "sales_assist",
+            "topic":          "",
+            "needs_live":     True,
+            "needs_internal": True,
+        }
 
 
 # =============================================================================
