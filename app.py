@@ -5,6 +5,7 @@ import asyncio
 import requests
 from dotenv import load_dotenv
 import re
+from openai import OpenAI
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +63,12 @@ pc           = Pinecone(api_key=PINECONE_API_KEY)
 index        = pc.Index(PINECONE_INDEX)
 groq_client  = Groq(api_key=GROQ_API_KEY)
 genai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+deepseek_client    = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
 
 # =============================================================================
 # FASTAPI APP
@@ -266,7 +273,7 @@ OUTPUT — return ONLY this JSON, no explanation:
 User query: {user_query}"""
     try:
         resp = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="qwen/qwen3-32b",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         max_tokens=200,
