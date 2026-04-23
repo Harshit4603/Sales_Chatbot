@@ -897,6 +897,9 @@ Here is the raw answer to reformat:
 ---
 {raw_answer}
 ---
+PRIORITY RULE: If answer contains both internal docs section AND web search results,
+always lead with the web search result as it has more specific and current information.
+Summarize internal docs section only if it adds unique value not in web results.
 
 FORMATTING RULES:
 1. First line must directly answer the question — no preamble
@@ -909,7 +912,7 @@ FORMATTING RULES:
    - "Please contact" → only keep if genuinely no other option
    - "cannot" / "unable" → rephrase around what IS possible
 6. Always end with a subtle sales nudge when relevant
-7. Structure to fit within 250 words — be complete, not truncated
+7. Structure to fit within 300 tokens — be complete, not truncated
 8. For comparisons — cover both products fully before ending
 
 OUTPUT: Return only the reformatted answer. No meta-commentary."""
