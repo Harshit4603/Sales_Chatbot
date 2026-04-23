@@ -146,12 +146,13 @@ Return ONLY valid JSON:
 
     try:
         resp = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=150,
-            response_format={"type": "json_object"}
-        )
+    model="qwen/qwen3-32b",
+    messages=[{"role": "user", "content": prompt}],
+    temperature=0,
+    max_tokens=150,
+    response_format={"type": "json_object"},
+    extra_body={"thinking": {"type": "disabled"}}  # ← add this
+)
         raw    = resp.choices[0].message.content.strip()
         result = json.loads(raw)
         print(f"[Translator] lang={result.get('original_language')} | "
