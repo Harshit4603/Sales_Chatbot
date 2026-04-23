@@ -38,7 +38,7 @@ SOURCES_ACCESSED    = 10     # top_k chunks pulled from Pinecone per query
 MEMORY_TURNS        = 5      # how many past Q&A pairs to include in the LLM prompt
 DB_STRONG_THRESHOLD = 4      # min strong DB chunks to consider DB context "rich"
 SCORE_THRESHOLD     = 0.25   # min Pinecone score to count a chunk as "strong"
-MAX_CONTEXT_CHARS   = 3000   # cap on DB context fed to LLM
+MAX_CONTEXT_CHARS   = 4500   # cap on DB context fed to LLM
 
 # =============================================================================
 # CLIENTS
@@ -124,6 +124,50 @@ ROLE_CATEGORY_ALLOW = {
     "sales":    {"product", "pricing", "faq", "general"},
     "employee": {"product", "policy", "sop", "training", "pricing", "faq", "general"},
 }
+
+def detect_and_translate(user_query: str) -> dict:
+    """Detects language and translates to English if non-English/non-Hinglish."""
+    prompt = f"""Detect the language of this query and translate to English if needed.
+
+Query: {user_query}
+
+Rules:
+- If English → return as is
+- If Hinglish (Hindi+English mix) → return as is, it is supported natively
+- If any other language (Marathi, Tamil, Telugu, Gujarati, Kannada, Bengali etc.) → translate to English
+- Always identify the original language
+
+Return ONLY valid JSON:
+{{
+  "original_language": "english|hinglish|hindi|marathi|tamil|telugu|gujarati|kannada|bengali|other",
+  "translated_query": "<translated to English, or original if english/hinglish>",
+  "needs_translation": true | false
+}}"""
+
+    try:
+        resp = groq_client.chat.completions.create(
+            model="qwen/qwen3-32b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=150,
+            response_format={"type": "json_object"}
+        )
+        raw    = resp.choices[0].message.content.strip()
+        result = json.loads(raw)
+        print(f"[Translator] lang={result.get('original_language')} | "
+              f"needs_translation={result.get('needs_translation')}")
+        return {
+            "original_language": result.get("original_language", "english"),
+            "translated_query":  result.get("translated_query", user_query),
+            "needs_translation": bool(result.get("needs_translation", False))
+        }
+    except Exception as e:
+        print(f"[Translator] Failed ({e}) — using original query")
+        return {
+            "original_language": "english",
+            "translated_query":  user_query,
+            "needs_translation": False
+        }
 
 # =============================================================================
 # STEP 1 — QUERY PARSER
@@ -815,20 +859,44 @@ async def fetch_gemini_async(user_query: str, db_context: str) -> dict:
 def count_strong(db_chunks: list[dict]) -> int:
     return sum(1 for c in db_chunks if c.get("_score", 0) >= SCORE_THRESHOLD)
 
-def format_final_answer(raw_answer: str, user_query: str) -> str:
-    prompt = f"""You are a sales assistant formatter for The Sleep Company.
+def format_final_answer(raw_answer: str, user_query: str, 
+                        original_language: str = "english") -> str:
+    
+    language_instruction = ""
+    if original_language == "hinglish":
+        language_instruction = """
+LANGUAGE: Respond in Hinglish (Hindi+English mix) — same style as the user's query.
+Example: "Valencia sofa 3 seater mein SmartGRID technology hai. Price around ₹45,000 se start hoti hai.\""""
+    elif original_language not in ("english", "hinglish"):
+        language_instruction = f"""
+LANGUAGE: User's original language was {original_language}. 
+Respond in simple English — clear and easy to understand."""
 
-Reformat this answer for a sales rep:
-- Lead with direct answer to the query
-- Use bullet points only for lists of 3+ items
-- Keep tone confident, positive, sales-oriented
-- Remove any "I don't have" or negative phrases
-- Max 150 words unless comparison query
-- NOTE - your output token limit is 300. Your answer needs to be complete so sturcture accordingly.
+    prompt = f"""You are a senior sales trainer at The Sleep Company formatting responses for sales reps on the floor.
 
-Query: {user_query}
-Raw answer: {raw_answer}
-Formatted answer:"""
+A sales rep asked: "{user_query}"
+{language_instruction}
+
+Here is the raw answer to reformat:
+---
+{raw_answer}
+---
+
+FORMATTING RULES:
+1. First line must directly answer the question — no preamble
+2. Use bullet points ONLY for lists of 3 or more items
+3. For single facts or short answers — plain sentences only
+4. Tone: confident, positive, sales-oriented — never uncertain
+5. Replace any negative/weak phrases:
+   - "I don't have" → omit or rephrase positively
+   - "I'm not sure" → omit
+   - "Please contact" → only keep if genuinely no other option
+   - "cannot" / "unable" → rephrase around what IS possible
+6. Always end with a subtle sales nudge when relevant
+7. Structure to fit within 250 words — be complete, not truncated
+8. For comparisons — cover both products fully before ending
+
+OUTPUT: Return only the reformatted answer. No meta-commentary."""
 
     try:
         resp = groq_client.chat.completions.create(
@@ -843,13 +911,16 @@ Formatted answer:"""
         return raw_answer
 
 def smart_merge(
-    user_query:    str,
-    doc_category:  str,
-    db_chunks:     list[dict],
-    db_context:    str,
-    groq_answer:   str,
-    gemini_result: dict,
+    user_query:        str,
+    doc_category:      str,
+    db_chunks:         list[dict],
+    db_context:        str,
+    groq_answer:       str,
+    gemini_result:     dict,
+    original_language: str = "english",
+    original_query:    str = "",
 ) -> tuple[str, dict]:
+
 
     gemini_answer = gemini_result.get("answer", "")
     web_sources   = gemini_result.get("web_sources", [])
@@ -871,7 +942,8 @@ def smart_merge(
                 "Please check the latest pricing and availability directly on "
                 "https://thesleepcompany.in or confirm with your manager."
             )
-        final = format_final_answer(final, user_query)
+        final = format_final_answer(final, original_query or user_query, original_language)
+
         return final, {"db_sources": [], "web_sources": web_sources}
 
     # ── INTERNAL ─────────────────────────────────────────────────────────────
@@ -885,7 +957,8 @@ def smart_merge(
             )
         else:
             final = groq_answer
-        final = format_final_answer(final, user_query)
+        final = format_final_answer(final, original_query or user_query, original_language)
+
         return final, {"db_sources": db_sources, "web_sources": []}
 
     # ── SALES ASSIST ──────────────────────────────────────────────────────────
@@ -905,7 +978,8 @@ def smart_merge(
                 "I couldn't retrieve enough information right now. "
                 "Please visit https://thesleepcompany.in or contact your manager."
             )
-        final = format_final_answer(final, user_query)
+        final = format_final_answer(final, original_query or user_query, original_language)
+
         return final, {"db_sources": db_sources, "web_sources": web_sources}
 
     # ── GENERAL FALLBACK ─────────────────────────────────────────────────────
@@ -920,7 +994,7 @@ def smart_merge(
         )
         web_sources = retry.get("web_sources", web_sources)
 
-    final = format_final_answer(final, user_query)
+    final = format_final_answer(final, original_query or user_query, original_language)
     return final, {"db_sources": db_sources, "web_sources": web_sources}
 
 
@@ -942,10 +1016,12 @@ def smart_merge(
 # =============================================================================
 
 async def parallel_retrieve_and_answer_async(
-    user_query:   str,
-    parsed:       dict,
-    memory_block: str       = "",
-    role:         str | None = None,
+    user_query:        str,
+    parsed:            dict,
+    memory_block:      str       = "",
+    role:              str | None = None,
+    original_language: str       = "english",
+    original_query:    str       = "",
 ) -> tuple[str, dict]:
 
     doc_category = parsed["doc_category"]
@@ -999,15 +1075,21 @@ async def parallel_retrieve_and_answer_async(
 
     # ── Phase 3: Smart merge ──────────────────────────────────────────────────
     return smart_merge(
-        user_query, doc_category, db_chunks, db_context, groq_answer, gemini_result
-    )
+    user_query, doc_category, db_chunks, db_context, groq_answer, gemini_result,
+    original_language=original_language,
+    original_query=original_query or user_query
+)
+
+
 
 
 def parallel_retrieve_and_answer(
-    user_query:   str,
-    parsed:       dict,
-    memory_block: str       = "",
-    role:         str | None = None,
+    user_query:        str,
+    parsed:            dict,
+    memory_block:      str       = "",
+    role:              str | None = None,
+    original_language: str       = "english",
+    original_query:    str       = "",
 ) -> tuple[str, dict]:
     """Synchronous wrapper for FastAPI endpoints."""
     try:
@@ -1017,17 +1099,22 @@ def parallel_retrieve_and_answer(
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(
-                    asyncio.run,
-                    parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role)
-                )
+    asyncio.run,
+    parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role,
+                                       original_language, original_query)
+)
+
                 return future.result()
         else:
             return loop.run_until_complete(
-                parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role)
-            )
+    parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role,
+                                       original_language, original_query)
+)
+
     except RuntimeError:
         return asyncio.run(
-            parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role)
+            parallel_retrieve_and_answer_async(user_query, parsed, memory_block, role,
+                                               original_language, original_query)
         )
 
 
@@ -1075,7 +1162,12 @@ def process_query(
     role:         str | None = None,
 ) -> tuple[str, dict]:
 
-    parsed     = parse_query(user_query)
+    # ── Language detection + translation ──────────────────────────────────────
+    lang_result       = detect_and_translate(user_query)
+    original_language = lang_result["original_language"]
+    query_for_pipeline = lang_result["translated_query"]
+
+    parsed     = parse_query(query_for_pipeline)
     query_type = parsed["query_type"]
 
     # ── GIBBERISH ─────────────────────────────────────────────────────────────
@@ -1089,12 +1181,16 @@ def process_query(
     # ── CONVERSATIONAL ────────────────────────────────────────────────────────
     if query_type == "conversational":
         print("[Pipeline] Conversational — short-circuiting")
-        answer = handle_conversational(user_query, memory_block)
+        answer = handle_conversational(query_for_pipeline, memory_block)
         return answer, {"db_sources": [], "web_sources": []}
 
     # ── RETRIEVAL (internal / live / sales_assist) ────────────────────────────
     print(f"[Pipeline] Retrieval ({parsed['doc_category']}) — parallel fetch + smart merge")
-    return parallel_retrieve_and_answer(user_query, parsed, memory_block, role)
+    return parallel_retrieve_and_answer(
+    query_for_pipeline, parsed, memory_block, role,
+    original_language=original_language,
+    original_query=user_query
+)
 
 
 # =============================================================================
