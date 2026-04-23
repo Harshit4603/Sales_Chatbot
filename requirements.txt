@@ -19,6 +19,7 @@ sqlalchemy
 groq
 # anthropic                  # ← Remove or comment this out (no longer needed)
 google-genai>=1.73.0          # ← New: Official Google GenAI SDK for Gemini
+openai
 
 # Vector DB & Embeddings
 pinecone
