@@ -272,11 +272,11 @@ OUTPUT — return ONLY this JSON, no explanation:
 
 User query: {user_query}"""
     try:
-        resp = deepseek_client.chat.completions.create(
-        model="deepseek/deepseek-r1:free",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-        max_tokens=800,
+        resp = groq_client.chat.completions.create(
+    model="qwen/qwen3-32b",
+    messages=[{"role": "user", "content": prompt}],
+    temperature=0,
+    max_tokens=800,
 )
         raw = resp.choices[0].message.content.strip()
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
