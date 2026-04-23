@@ -152,6 +152,7 @@ Return ONLY valid JSON:
     max_tokens=150,
 )
         raw = resp.choices[0].message.content.strip()
+        print(f"[Translator] Raw response: '{raw[:300]}'")
 
         # Strip thinking blocks if present
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
