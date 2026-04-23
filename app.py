@@ -149,7 +149,7 @@ Return ONLY valid JSON:
     model="qwen/qwen3-32b",
     messages=[{"role": "user", "content": prompt}],
     temperature=0,
-    max_tokens=150,
+    max_tokens=1500,
 )
         raw = resp.choices[0].message.content.strip()
         print(f"[Translator] Raw response: '{raw[:300]}'")
