@@ -150,10 +150,16 @@ Return ONLY valid JSON:
     messages=[{"role": "user", "content": prompt}],
     temperature=0,
     max_tokens=150,
-    response_format={"type": "json_object"},
-    extra_body={"thinking": {"type": "disabled"}}  # ← add this
 )
-        raw    = resp.choices[0].message.content.strip()
+        raw = resp.choices[0].message.content.strip()
+
+        # Strip thinking blocks if present
+        raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+
+        # Extract JSON
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        raw = match.group() if match else raw
         result = json.loads(raw)
         print(f"[Translator] lang={result.get('original_language')} | "
               f"needs_translation={result.get('needs_translation')}")
