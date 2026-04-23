@@ -912,7 +912,7 @@ FORMATTING RULES:
    - "Please contact" → only keep if genuinely no other option
    - "cannot" / "unable" → rephrase around what IS possible
 6. Always end with a subtle sales nudge when relevant
-7. Structure to fit within 300 tokens — be complete, not truncated
+7. Structure to fit within 150 words — make sure answer is complete, not truncated
 8. For comparisons — cover both products fully before ending
 
 OUTPUT: Return only the reformatted answer. No meta-commentary."""
