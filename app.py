@@ -1185,13 +1185,14 @@ Example: ["What is the warranty period?", "Is it available in white?", "What's t
         model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.4,
-        response_format={"type": "json_object"}
     )
         raw = resp.choices[0].message.content.strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         raw = match.group() if match else raw
         suggestions = json.loads(raw)
+        if isinstance(suggestions, dict):
+            suggestions = next((v for v in suggestions.values() if isinstance(v, list)), [])
         return suggestions if isinstance(suggestions, list) else []
     except Exception as e:
         print(f"[Followups] Error: {e}")
