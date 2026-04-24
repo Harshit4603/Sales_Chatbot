@@ -905,14 +905,11 @@ def format_final_answer(raw_answer: str, user_query: str,
                         original_language: str = "english") -> str:
     
     language_instruction = ""
-    if original_language == "english":
-        language_instruction = ""
-    else:
+    if original_language != "english":
         language_instruction = f"""
 LANGUAGE RULE — VERY IMPORTANT:
 User wrote in: {original_language}
 You MUST respond in the same language style as the user's query.
-
 - If user wrote in Hindi/Hinglish → respond in Hinglish (Hindi+English mix)
   Example: "Hum mattress, sofa, pillow aur recliner bechte hain. Elite Sofa sabse popular hai."
 - If user wrote in pure Hindi → respond in Hindi with product names in English
@@ -924,11 +921,13 @@ You MUST respond in the same language style as the user's query.
 - Numbers, prices → always in English/numerals
 - Never respond in pure English if user wrote in another language
 - Match the user's energy — casual query gets casual response, formal gets formal
-
 User's original query was: "{user_query}"
 """
-{language_instruction}
 
+    prompt = f"""You are a senior sales trainer at The Sleep Company formatting responses for sales reps on the floor.
+
+A sales rep asked: "{user_query}"
+{language_instruction}
 Here is the raw answer to reformat:
 ---
 {raw_answer}
