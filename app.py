@@ -1371,11 +1371,15 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     increment_route_counter(parsed_for_stats.get("doc_category", "internal"), db)
 
     # 4. Log to DB
+    _cat          = parsed_for_stats.get("doc_category", "internal")
+    _used_internet = _cat in ("live", "sales_assist")
+    
     message = ChatMessage(
-        session_id  = session.session_id,
-        employee_id = request.employee_id,
-        query       = request.query,
-        answer      = answer,
+        session_id    = session.session_id,
+        employee_id   = request.employee_id,
+        query         = request.query,
+        answer        = answer,
+        used_internet = _used_internet,
     )
     db.add(message)
     session.last_active_at = get_ist()
