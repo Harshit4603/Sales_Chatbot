@@ -1240,11 +1240,11 @@ def process_query(
 
 def increment_route_counter(doc_category: str, db: Session):
     try:
-        db.execute(
-            text("UPDATE route_stats SET count = count + 1 WHERE route = :route"),
-            {"route": doc_category}
-        )
-        db.commit()
+        if doc_category in ("live", "sales_assist"):
+            db.execute(
+                text("UPDATE route_stats SET count = count + 1 WHERE route = 'internet'"),
+            )
+            db.commit()
     except Exception as e:
         print(f"[RouteCounter] Failed ({e})")
 
