@@ -348,79 +348,62 @@ User query: {user_query}"""
 
 def rewrite_query(user_query: str, memory_block: str, parsed: dict) -> str:
     """Resolves pronouns and rewrites query based on route type."""
-    
-    query_type   = parsed.get("query_type")
-    doc_category = parsed.get("doc_category")
-    needs_live   = parsed.get("needs_live")
+
+    query_type     = parsed.get("query_type")
+    needs_live     = parsed.get("needs_live")
     needs_internal = parsed.get("needs_internal")
 
     # ── Branch 1: Conversational — no rewrite needed ─────────────────────────
     if query_type in ("conversational", "informational"):
         return user_query
 
-    # ── Branch 2: Live only (price/stock/competitor) ──────────────────────────
-    if needs_live and not needs_internal:
-        if not memory_block:
-            return user_query
-        prompt = f"""Rewrite the query into a clear, self-contained query.
+    # ── No memory — nothing to resolve ───────────────────────────────────────
+    if not memory_block:
+        return user_query
 
+    # ── Branch 2: Live only (price / stock / competitor) ─────────────────────
+    if needs_live and not needs_internal:
+        prompt = f"""Rewrite the query into a clear, self-contained web search query.
 IMPORTANT RULES:
 - Conversation history is ordered from oldest → latest
 - The LAST turn is the most recent and most important
-- Prefer resolving references using the latest turn unless user clearly refers to earlier context
-- Words like "this", "that", "it", "those" should refer to the most recent relevant entity
-
-Be specific about product/policy name and user intent.
+- Resolve pronouns ("this", "it", "those") using the most recent relevant entity
+- Include brand names, product names, or competitor names explicitly
+- Optimise for a Google search (concise, keyword-rich)
 Return ONLY the rewritten query.
-
 History:
 {memory_block}
-
 Query: {user_query}
-
 Rewritten:"""
 
     # ── Branch 3: Internal only (SOPs, policy, stable specs) ─────────────────
     elif needs_internal and not needs_live:
-        if not memory_block:
-            return user_query
-        prompt = f"""Rewrite the query into a clear, self-contained query.
-
+        prompt = f"""Rewrite the query into a clear, self-contained internal document search query.
 IMPORTANT RULES:
 - Conversation history is ordered from oldest → latest
 - The LAST turn is the most recent and most important
-- Prefer resolving references using the latest turn unless user clearly refers to earlier context
-- Words like "this", "that", "it", "those" should refer to the most recent relevant entity
-
-Be specific about product/policy name and user intent.
+- Resolve pronouns ("this", "it", "those") using the most recent relevant entity
+- Use precise internal terminology (product codes, policy names, SOP titles) where inferable
+- Do NOT add speculation — only what the user is clearly asking
 Return ONLY the rewritten query.
-
 History:
 {memory_block}
-
 Query: {user_query}
-
 Rewritten:"""
-    # ── Branch 4: Both live + internal (comparison/mixed) ────────────────────
-    else:
-        if not memory_block:
-            return user_query
-        prompt = f"""Rewrite the query into a clear, self-contained query.
 
+    # ── Branch 4: Both live + internal (comparison / mixed) ──────────────────
+    else:
+        prompt = f"""Rewrite the query into a clear, self-contained query suitable for both internal document retrieval and a live web search.
 IMPORTANT RULES:
 - Conversation history is ordered from oldest → latest
 - The LAST turn is the most recent and most important
-- Prefer resolving references using the latest turn unless user clearly refers to earlier context
-- Words like "this", "that", "it", "those" should refer to the most recent relevant entity
-
-Be specific about product/policy name and user intent.
+- Resolve pronouns ("this", "it", "those") using the most recent relevant entity
+- Mention the product/competitor/policy explicitly
+- Balance specificity (for internal docs) with searchability (for web)
 Return ONLY the rewritten query.
-
 History:
 {memory_block}
-
 Query: {user_query}
-
 Rewritten:"""
 
     try:
@@ -430,15 +413,13 @@ Rewritten:"""
             temperature=0,
             max_tokens=60,
         )
-        rewritten = resp.choices[0].message.content.strip()
-        rewritten = rewritten.replace("```", "").strip()
+        rewritten = resp.choices[0].message.content.strip().replace("```", "").strip()
         if rewritten and rewritten != user_query:
             print(f"[Rewriter] '{user_query}' → '{rewritten}'")
-        return rewritten
+        return rewritten or user_query          # guard against empty response
     except Exception as e:
         print(f"[Rewriter] Failed ({e}) — using original query")
         return user_query
-
 
 # =============================================================================
 # STEP 3 — CONVERSATIONAL HANDLER
@@ -1234,7 +1215,9 @@ def process_query(
 
     parsed     = parse_query(query_for_pipeline)
     query_type = parsed["query_type"]
-    route_counter[parsed.get("doc_category", "internal")] += 1
+    category = parsed.get("doc_category", "internal") or "internal"
+    category = category if category in route_counter else "internal"
+    route_counter[category] += 1
     print(f"[Routes] {route_counter}")
 
     # ── GIBBERISH ─────────────────────────────────────────────────────────────
