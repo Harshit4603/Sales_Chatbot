@@ -926,7 +926,9 @@ You MUST respond in the same language style as the user's query.
 - Match the user's energy — casual query gets casual response, formal gets formal
 User's original query was: "{user_query}"
 """
-
+    # Strip echoed question if Groq repeated it
+    if raw_answer.lower().startswith(user_query[:30].lower()):
+        raw_answer = raw_answer[len(user_query):].strip()
     prompt = f"""You are a senior sales trainer at The Sleep Company formatting responses for sales reps on the floor.
 
 A sales rep asked: "{user_query}"
@@ -956,6 +958,7 @@ sales_nudge_rule = (
 )
 7. Structure to fit within 150 words — make sure answer is complete, not truncated
 8. For comparisons — cover both products fully before ending
+9. If the answer begins by repeating the question, remove it and start directly with the answer.
 
 OUTPUT: Return only the reformatted answer. No meta-commentary."""
 
