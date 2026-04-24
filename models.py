@@ -36,6 +36,7 @@ class ChatMessage(Base):
     query       = Column(Text, nullable=False)
     answer      = Column(Text, nullable=False)
     rating      = Column(String(20), nullable=True)
+    used_internet = Column(String(5), nullable=True)
 
 class EmployeeDevice(Base):
     __tablename__ = "employee_devices"
