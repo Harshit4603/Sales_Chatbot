@@ -18,6 +18,7 @@ from google.genai import types
 
 from database import get_db
 from models import ChatSession, ChatMessage, Employee, get_ist
+from sqlalchemy import text
 from fastapi import File, UploadFile
 import tempfile
 import shutil
@@ -53,8 +54,6 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX   = "sales-chatbot"
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
-route_counter = {"internal": 0, "live": 0, "sales_assist": 0, "conversational": 0, "gibberish": 0}
 
 print("HF_API_KEY    :", "✅" if HF_API_KEY    else "❌ MISSING")
 print("PINECONE_KEY  :", "✅" if PINECONE_API_KEY else "❌ MISSING")
@@ -1216,10 +1215,6 @@ def process_query(
 
     parsed     = parse_query(query_for_pipeline)
     query_type = parsed["query_type"]
-    category = parsed.get("doc_category", "internal") or "internal"
-    category = category if category in route_counter else "internal"
-    route_counter[category] += 1
-    print(f"[Routes] {route_counter}")
 
     # ── GIBBERISH ─────────────────────────────────────────────────────────────
     if query_type == "gibberish":
@@ -1243,6 +1238,15 @@ def process_query(
     original_query=user_query
 )
 
+def increment_route_counter(doc_category: str, db: Session):
+    try:
+        db.execute(
+            text("UPDATE route_stats SET count = count + 1 WHERE route = :route"),
+            {"route": doc_category}
+        )
+        db.commit()
+    except Exception as e:
+        print(f"[RouteCounter] Failed ({e})")
 
 # =============================================================================
 # API ENDPOINTS
@@ -1319,6 +1323,14 @@ async def admin_ingest(file: UploadFile = File(...)):
 def root():
     return {"status": "The Sleep Company Assistant API is running"}
 
+@app.get("/stats/routes")
+def get_route_stats(db: Session = Depends(get_db)):
+    try:
+        result = db.execute(text("SELECT route, count FROM route_stats ORDER BY count DESC"))
+        rows   = result.fetchall()
+        return {"route_stats": {row[0]: row[1] for row in rows}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/login")
 def login(request: LoginRequest, db: Session = Depends(get_db)):
@@ -1353,6 +1365,10 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
     # 3. Run pipeline
     answer, sources = process_query(request.query, memory_block, role=request.role)
+    
+    # 4. Track route
+    parsed_for_stats = parse_query(request.query)
+    increment_route_counter(parsed_for_stats.get("doc_category", "internal"), db)
 
     # 4. Log to DB
     message = ChatMessage(
