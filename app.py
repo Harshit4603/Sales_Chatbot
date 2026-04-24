@@ -694,9 +694,11 @@ Your role:
 CRITICAL RULES:
 - Use ONLY the provided context
 - Do NOT hallucinate product names, prices, or specs
-- If you have partial information, present what you know directly without disclaimers.
-- Only if you have NO information at all, say: 'I don't have that detail in our internal docs.'
-- Never prefix your answer with what you don't know. Lead with what you do know.'
+- Extract and state the actual answer and steps directly from the context.
+- NEVER say "refer to document X", "details can be found in Y", "as per handbook", or any similar redirect — that is a non-answer.
+- If context mentions a process name, also state what that process actually involves — steps, location, fields, etc.
+- Only if context is truly empty say: 'I don't have that detail in our internal docs.'
+- Never prefix your answer with what you don't know. Lead with what you do know.
 
 STYLE: Professional, Brief, concise, and point-wise. Plain text only. Answer specifically and completely. Use bullet points for lists.
 Cover all relevant details — colors, sizes, features, steps — don't truncate.
@@ -902,7 +904,8 @@ def count_strong(db_chunks: list[dict]) -> int:
     return sum(1 for c in db_chunks if c.get("_score", 0) >= SCORE_THRESHOLD)
 
 def format_final_answer(raw_answer: str, user_query: str, 
-                        original_language: str = "english") -> str:
+                        original_language: str = "english",
+                        doc_category: str = "internal") -> str:
     
     language_instruction = ""
     if original_language != "english":
@@ -946,7 +949,11 @@ FORMATTING RULES:
    - "I'm not sure" → omit
    - "Please contact" → only keep if genuinely no other option
    - "cannot" / "unable" → rephrase around what IS possible
-6. Always end with a subtle sales nudge when relevant
+sales_nudge_rule = (
+    "6. End with a subtle sales nudge when relevant — suggest the product naturally"
+    if doc_category in ("live", "sales_assist")
+    else "6. Do NOT add any product recommendation or sales pitch. This is an operational/HR/SOP query. End when the answer is complete."
+)
 7. Structure to fit within 150 words — make sure answer is complete, not truncated
 8. For comparisons — cover both products fully before ending
 
@@ -996,14 +1003,15 @@ def smart_merge(
                 "Please check the latest pricing and availability directly on "
                 "https://thesleepcompany.in or confirm with your manager."
             )
-        final = format_final_answer(final, original_query or user_query, original_language)
+        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
 
         return final, {"db_sources": [], "web_sources": web_sources}
 
     # ── INTERNAL ─────────────────────────────────────────────────────────────
     if doc_category == "internal":
         print("[Merge] Strategy: INTERNAL → Groq primary")
-        if not groq_answer or "don't have" in groq_answer.lower() or "contact" in groq_answer.lower():
+        REDIRECT_PHRASES = ("don't have", "contact", "refer to", "section of", "can be found", "handbook", "as per", "please visit", "details in")
+        if not groq_answer or any(phrase in groq_answer.lower() for phrase in REDIRECT_PHRASES):
             print("[Merge] Groq unhelpful → falling back to Gemini")
             final = gemini_answer or (
                 "I don't have enough information on this. "
@@ -1011,7 +1019,7 @@ def smart_merge(
             )
         else:
             final = groq_answer
-        final = format_final_answer(final, original_query or user_query, original_language)
+        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
 
         return final, {"db_sources": db_sources, "web_sources": []}
 
@@ -1032,7 +1040,7 @@ def smart_merge(
                 "I couldn't retrieve enough information right now. "
                 "Please visit https://thesleepcompany.in or contact your manager."
             )
-        final = format_final_answer(final, original_query or user_query, original_language)
+        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
 
         return final, {"db_sources": db_sources, "web_sources": web_sources}
 
@@ -1048,7 +1056,7 @@ def smart_merge(
         )
         web_sources = retry.get("web_sources", web_sources)
 
-    final = format_final_answer(final, original_query or user_query, original_language)
+    final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
     return final, {"db_sources": db_sources, "web_sources": web_sources}
 
 
@@ -1103,7 +1111,9 @@ async def parallel_retrieve_and_answer_async(
     if needs_internal and db_chunks:
         groq_prompt = (
             f"{memory_section}"
-            f"Use ONLY the following internal context to answer.\n"
+            f"Extract the specific answer from the context below.\n"
+            f"State exact steps, process names, field names, and locations.\n"
+            f"Do NOT say 'refer to document' or 'see handbook' — pull the actual content out.\n"
             f"--- CONTEXT ---\n{db_context}\n---------------\n"
             f"Question: {user_query}\nAnswer:"
         )
