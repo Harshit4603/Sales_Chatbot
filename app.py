@@ -54,6 +54,8 @@ PINECONE_INDEX   = "sales-chatbot"
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
 GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
+route_counter = {"internal": 0, "live": 0, "sales_assist": 0, "conversational": 0, "gibberish": 0}
+
 print("HF_API_KEY    :", "✅" if HF_API_KEY    else "❌ MISSING")
 print("PINECONE_KEY  :", "✅" if PINECONE_API_KEY else "❌ MISSING")
 print("GROQ_API_KEY  :", "✅" if GROQ_API_KEY   else "❌ MISSING")
@@ -1232,6 +1234,8 @@ def process_query(
 
     parsed     = parse_query(query_for_pipeline)
     query_type = parsed["query_type"]
+    route_counter[parsed.get("doc_category", "internal")] += 1
+    print(f"[Routes] {route_counter}")
 
     # ── GIBBERISH ─────────────────────────────────────────────────────────────
     if query_type == "gibberish":
