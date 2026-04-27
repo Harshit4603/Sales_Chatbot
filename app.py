@@ -83,6 +83,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.patch("/messages/{message_id}/save")
+async def toggle_save_message(message_id: str, body: SaveRequest, db: Session = Depends(get_db)):
+    db.execute(
+        text("UPDATE chat_messages SET is_saved = :saved WHERE id = :id"),
+        {"saved": body.saved, "id": message_id}
+    )
+    db.commit()
+    return {"success": True, "is_saved": body.saved}
+
+@app.get("/employees/{employee_id}/saved")
+async def get_saved_messages(employee_id: str, db: Session = Depends(get_db)):
+    result = db.execute(
+        text("""
+            SELECT cm.id, cm.content, cm.created_at, cm.is_saved
+            FROM chat_messages cm
+            JOIN chat_sessions cs ON cm.session_id = cs.id
+            WHERE cs.employee_id = :emp_id AND cm.is_saved = TRUE
+            ORDER BY cm.created_at DESC
+        """),
+        {"emp_id": employee_id}
+    ).fetchall()
+    return [dict(row._mapping) for row in result]
 
 # =============================================================================
 # PYDANTIC MODELS
@@ -96,6 +118,9 @@ class ChatRequest(BaseModel):
 
 class RatingRequest(BaseModel):
     rating: str
+
+class SaveRequest(BaseModel):
+    saved: bool
 
 class LoginRequest(BaseModel):
     email:    str
