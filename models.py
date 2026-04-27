@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from database import Base
 from datetime import datetime, timedelta
@@ -37,6 +37,8 @@ class ChatMessage(Base):
     answer      = Column(Text, nullable=False)
     rating      = Column(String(20), nullable=True)
     used_internet = Column(String(5), nullable=True)
+    used_internet = Column(String(5), nullable=True)
+    is_saved    = Column(Boolean, default=False)
 
 class EmployeeDevice(Base):
     __tablename__ = "employee_devices"
