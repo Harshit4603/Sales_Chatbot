@@ -955,39 +955,30 @@ User's original query was: "{user_query}"
     # Strip echoed question if Groq repeated it
     if raw_answer.lower().startswith(user_query[:30].lower()):
         raw_answer = raw_answer[len(user_query):].strip()
-    prompt = f"""You are a senior sales trainer at The Sleep Company formatting responses for sales reps on the floor.
-
+    prompt = f"""You are formatting a sales assistant reply for shop floor reps at The Sleep Company.
+    
 A sales rep asked: "{user_query}"
 {language_instruction}
-Here is the raw answer to reformat:
+
+Raw answer to reformat:
 ---
 {raw_answer}
 ---
-PRIORITY RULE: If answer contains both internal docs section AND web search results,
-always lead with the web search result as it has more specific and current information.
-Summarize internal docs section only if it adds unique value not in web results.
 
-FORMATTING RULES:
-1. First line must directly answer the question — no preamble
-2. Use bullet points ONLY for lists of 3 or more items
-3. For single facts or short answers — plain sentences only
-4. Tone: confident, positive, sales-oriented — never uncertain
-5. Replace any negative/weak phrases:
-   - "I don't have" → omit or rephrase positively
-   - "I'm not sure" → omit
-   - "Please contact" → only keep if genuinely no other option
-   - "cannot" / "unable" → rephrase around what IS possible
-sales_nudge_rule = (
-    "6. End with a subtle sales nudge when relevant — suggest the product naturally"
-    if doc_category in ("live", "sales_assist")
-    else "6. Do NOT add any product recommendation or sales pitch. This is an operational/HR/SOP query. End when the answer is complete."
-)
-7. Structure to fit within 150 words — make sure answer is complete, not truncated
-8. For comparisons — cover both products fully before ending
-9. If the answer begins by repeating the question, remove it and start directly with the answer.
+PRIORITY: If answer has both internal docs AND web results, lead with web results (more current). Add internal docs only if they add something new.
 
-OUTPUT: Return only the reformatted answer. No meta-commentary."""
+RULES — follow all:
+1. First line = direct answer. No intro, no "Great question", no preamble.
+2. Simple words only. No jargon. Write like you're talking, not writing a report.
+3. Bullet points only for 3+ items. Single facts = plain sentence.
+4. Tone: confident, warm, helpful. Never uncertain or negative.
+5. Remove weak phrases: "I don't have" → skip it. "I'm not sure" → skip it. "Please contact" → only if truly no other option.
+6. {"End with a natural sales nudge — suggest the product briefly." if doc_category in ("live", "sales_assist") else "No sales pitch. End when the answer is complete."}
+7. Max 150 words. Must be complete — don't cut off mid-answer.
+8. For comparisons — cover both products before ending.
+9. Never start by repeating the question.
 
+OUTPUT: Only the formatted answer. Nothing else."""
     try:
         resp = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
