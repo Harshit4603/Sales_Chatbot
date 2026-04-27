@@ -100,11 +100,11 @@ async def toggle_save_message(message_id: str, body: SaveRequest, db: Session = 
 async def get_saved_messages(employee_id: str, db: Session = Depends(get_db)):
     result = db.execute(
         text("""
-            SELECT cm.message_id, cm.answer, cm.timestamp, cm.is_saved
+            SELECT cm.message_id, cm.query, cm.answer, cm.timestamp, cm.is_saved
             FROM chat_messages cm
             JOIN chat_sessions cs ON cm.session_id = cs.id
             WHERE cs.employee_id = :emp_id AND cm.is_saved = TRUE
-            ORDER BY cm.created_at DESC
+            ORDER BY cm.timestamp DESC
         """),
         {"emp_id": employee_id}
     ).fetchall()
