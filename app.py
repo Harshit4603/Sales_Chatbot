@@ -103,7 +103,7 @@ async def get_saved_messages(employee_id: str, db: Session = Depends(get_db)):
             SELECT cm.message_id, cm.query, cm.answer, cm.timestamp, cm.is_saved
             FROM chat_messages cm
             JOIN chat_sessions cs ON cm.session_id = cs.session_id
-            WHERE cs.employee_id = %(emp_id)s AND cm.is_saved = TRUE
+            WHERE cs.employee_id = :emp_id AND cm.is_saved = TRUE
             ORDER BY cm.timestamp DESC
         """),
         {"emp_id": employee_id}
