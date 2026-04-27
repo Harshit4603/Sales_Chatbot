@@ -83,6 +83,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class SaveRequest(BaseModel):
+    saved: bool
+
 @app.patch("/messages/{message_id}/save")
 async def toggle_save_message(message_id: str, body: SaveRequest, db: Session = Depends(get_db)):
     db.execute(
@@ -118,9 +122,6 @@ class ChatRequest(BaseModel):
 
 class RatingRequest(BaseModel):
     rating: str
-
-class SaveRequest(BaseModel):
-    saved: bool
 
 class LoginRequest(BaseModel):
     email:    str
