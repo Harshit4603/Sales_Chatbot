@@ -86,7 +86,7 @@ app.add_middleware(
 @app.patch("/messages/{message_id}/save")
 async def toggle_save_message(message_id: str, body: SaveRequest, db: Session = Depends(get_db)):
     db.execute(
-        text("UPDATE chat_messages SET is_saved = :saved WHERE id = :id"),
+        text("UPDATE chat_messages SET is_saved = :saved WHERE message_id = :id"),
         {"saved": body.saved, "id": message_id}
     )
     db.commit()
