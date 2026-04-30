@@ -991,12 +991,11 @@ def smart_merge(
     # ── INTERNAL ─────────────────────────────────────────────────────────────
     if doc_category == "internal":
         print("[Merge] Strategy: INTERNAL → Groq primary")
+        print(f"[Merge] Groq answer preview: {groq_answer[:200] if groq_answer else 'EMPTY'}")
         REDIRECT_PHRASES = ("contact", "refer to", "section of", "can be found", "handbook", "as per", "please visit", "details in")
-        if not groq_answer or any(phrase in groq_answer.lower() for phrase in REDIRECT_PHRASES):
-            print("[Merge] Groq unhelpful → using raw groq or fallback")
-            final = groq_answer or "I don't have enough details on this in our internal docs right now."
-        else:
-            final = groq_answer
+        matched = [p for p in REDIRECT_PHRASES if p in groq_answer.lower()] if groq_answer else []
+        print(f"[Merge] Matched redirect phrases: {matched}")
+        final = groq_answer or "I don't have enough details on this in our internal docs right now."
         final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
 
         return final, {"db_sources": db_sources, "web_sources": []}
