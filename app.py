@@ -674,6 +674,7 @@ HOW TO WRITE:
 - Never say "As per our documents" or "According to our records" — just answer confidently
 - If a part has no information in docs, weave it in naturally: "I don't have specifics on that part right now"
 - Use **text** for any sub-headers or key product names, never for every bullet
+- Always complete your last bullet fully — never end mid-sentence
 
 MULTI-PART QUERIES:
 - Acknowledge the full query in one natural line
@@ -704,6 +705,7 @@ def query_groq(prompt: str, model: str = "llama-3.3-70b-versatile",
                 {"role": "user",   "content": prompt},
             ],
             temperature=temperature,
+            max_tokens=1024,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
@@ -926,6 +928,7 @@ RULES:
 10. End with momentum — toward a sale, trial, or next question
 11. Never start with "Great question!" or similar hollow openers
 12. In comparisons — we always come out ahead
+13. Always complete the last bullet fully — never cut off mid-sentence
 
 OUTPUT: Only the polished answer, nothing else."""
     try:
@@ -933,7 +936,7 @@ OUTPUT: Only the polished answer, nothing else."""
             model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=300,
+            max_tokens=600,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
