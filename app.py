@@ -319,8 +319,10 @@ User query: {user_query}"""
             "topic":          topic,
             "needs_live":     False,
             "needs_internal": True,
+            "query_parts":    parsed.get("query_parts", []),
+            "is_multi_part":  bool(parsed.get("is_multi_part", False)),
         }
-
+           
     except Exception as e:
         print(f"[Parser] Failed ({e}) — defaulting to retrieval/sales_assist")
         return {
@@ -933,11 +935,14 @@ RULES:
 11. Never start with "Great question!" or similar hollow openers
 12. In comparisons — we always come out ahead
 13. Always complete the last bullet fully — never cut off mid-sentence
+14. MANDATORY: Every point MUST start with a bullet (•) — no paragraphs ever
+15. Use **bold** for key product names and standout features only
+16. Never write two consecutive sentences without a bullet between them
 
 OUTPUT: Only the polished answer, nothing else."""
     try:
         resp = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=600,
@@ -1208,7 +1213,7 @@ Good example: ["Which pillow suits chronic neck pain best?", "How does SmartGRID
     )
         raw = resp.choices[0].message.content.strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        match = re.search(r'\[.*\]', raw, re.DOTALL)
         raw = match.group() if match else raw
         suggestions = json.loads(raw)
         if isinstance(suggestions, dict):
