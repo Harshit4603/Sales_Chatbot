@@ -220,9 +220,25 @@ def parse_query(user_query: str) -> dict:
     prompt = f"""You are a query router for The Sleep Company internal sales assistant.
 
 STEP 1 — CLASSIFY:
-- gibberish: random/incoherent text
-- chit_chat: greetings, thanks, bye
-- work_query: anything product, process, policy, SOP, pricing, objection related
+GIBBERISH HANDLER:
+Receives: Random characters, incoherent text, empty noise
+Examples: "asdfgh", "123abc!!!", "blue the if running potato"
+→ Set gibberish=true
+
+CONVERSATIONAL HANDLER:
+Receives: Pure greetings, small talk, thanks, bye — no information needed
+System: Responds warmly, no data retrieval happens at all
+Examples: "Hi!", "Good morning", "Thanks", "You're helpful", "Bye"
+→ Set conversation_type=chit_chat
+
+- work_query: 
+- Product specs: dimensions, materials, technology, warranty, care instructions
+- Product catalog: series, variants, configurations, feature hierarchies
+- SOPs: return process, escalation paths, complaint handling, replacement policy
+- HR & ops: leave policy, attendance rules, conduct guidelines, onboarding, training material
+- Use-case recommendations: "Which mattress for back pain?" → answer using approved internal product mappings
+- Technical explanations: "What is SmartGRID?", "How does the Enkash works?"
+- Staff guidance: quick scripts, objection handlers based on approved product strengths
 
 STEP 2 — DECOMPOSE work_query into sub-questions:
 For each sub-question tag as:
