@@ -1051,18 +1051,18 @@ async def parallel_retrieve_and_answer_async(
 parts_block = "\n".join([f"- [{p['type'].upper()}] {p['question']}" for p in query_parts]) if query_parts else user_query
 is_multi = parsed.get("is_multi_part", False)
 
-groq_prompt = (
-    f"{memory_section}"
-    f"{'This query has multiple parts — answer each under its own header.' if is_multi else ''}\n"
-    f"Sub-questions to address:\n{parts_block}\n\n"
-    f"For PRODUCT parts use FABED structure.\n"
-    f"For PROCESS parts use precise steps from documents.\n"
-    f"Do NOT say 'refer to document' — extract actual content.\n"
-    f"--- CONTEXT ---\n{db_context}\n---------------\n"
-    f"Full query: {user_query}\nAnswer:"
-)
-        loop      = asyncio.get_event_loop()
-        groq_task = loop.run_in_executor(None, query_groq, groq_prompt)
+        groq_prompt = (
+            f"{memory_section}"
+            f"{'This query has multiple parts — answer each under its own header.' if is_multi else ''}\n"
+            f"Sub-questions to address:\n{parts_block}\n\n"
+            f"For PRODUCT parts use FABED structure.\n"
+            f"For PROCESS parts use precise steps from documents.\n"
+            f"Do NOT say 'refer to document' — extract actual content.\n"
+            f"--- CONTEXT ---\n{db_context}\n---------------\n"
+            f"Full query: {user_query}\nAnswer:"
+        )
+                loop      = asyncio.get_event_loop()
+                groq_task = loop.run_in_executor(None, query_groq, groq_prompt)
     else:
         async def _empty(): return ""
         groq_task = _empty()
