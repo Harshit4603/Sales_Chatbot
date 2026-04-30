@@ -217,84 +217,33 @@ Return ONLY valid JSON:
 # =============================================================================
 
 def parse_query(user_query: str) -> dict:
-    prompt = f"""You are a query router for 'The Sleep Company' internal sales assistant.
-The Sleep Company sells: sofas, mattresses, pillows, recliners, beds, bed frames.
-Employees are sales reps and staff who help customers and manage operations.
+    prompt = f"""You are a query router for The Sleep Company internal sales assistant.
 
-Route the query to the correct handler based on descriptions below.
+STEP 1 — CLASSIFY:
+- gibberish: random/incoherent text
+- chit_chat: greetings, thanks, bye
+- work_query: anything product, process, policy, SOP, pricing, objection related
 
-═══════════════════════════════════════════════════════
-HANDLER DESCRIPTIONS
-═══════════════════════════════════════════════════════
+STEP 2 — DECOMPOSE work_query into sub-questions:
+For each sub-question tag as:
+- "product": specs, features, pricing, comparisons, recommendations
+- "process": steps, SOPs, policies, return, onboarding, leave
 
-GIBBERISH HANDLER:
-Receives: Random characters, incoherent text, empty noise
-Examples: "asdfgh", "123abc!!!", "blue the if running potato"
-→ Set gibberish=true
+STEP 3 — SET FLAGS:
+- needs_internal_docs: true for all work_query
+- needs_live_data: always false
 
-CONVERSATIONAL HANDLER:
-Receives: Pure greetings, small talk, thanks, bye — no information needed
-System: Responds warmly, no data retrieval happens at all
-Examples: "Hi!", "Good morning", "Thanks", "You're helpful", "Bye"
-→ Set conversation_type=chit_chat
-
-INTERNAL HANDLER:
-Receives: Queries answerable from stable company documents
-System: Searches internal Pinecone knowledge base → Groq generates answer
-Handles:
-  - Product specs, dimensions, materials, technology, warranty
-  - SOPs, return process, escalation, complaint handling
-  - HR policies, leave, attendance, conduct, onboarding, training
-  - Product catalog, configurations, series, variants
-  - Recommendations from company offerings for a need/use case
-Examples: "Valencia sofa dimensions?", "What is SmartGRID?",
-          "Return policy for damaged sofa?", "Best mattress for back pain?"
-→ Set needs_internal_docs=true, needs_live_data=false
-
-LIVE HANDLER:
-Receives: Queries needing current real-time data from the web
-System: Gemini performs live Google Search — internal DB excluded
-Handles:
-  - Current pricing, EMI, discounts, festive offers
-  - Current colors, variants, shades, stock availability
-  - Competitor info, market data, brand comparisons
-  - Anything that changes week-to-week
-Examples: "Price of Valencia sofa?", "Colors available in SmartGRID?",
-          "Any ongoing offers?", "How does Wakefit compare in price?"
-→ Set needs_internal_docs=false, needs_live_data=true
-
-SALES ASSIST HANDLER:
-Receives: Queries needing BOTH stable internal knowledge AND live web data
-System: Pinecone DB + Gemini web search both run, results merged
-Handles:
-  - Comparisons between two products or brands
-  - Open-ended product help needing specs + live info
-  - Budget-based recommendations needing catalog + pricing
-  - Competitor objection handling needing internal specs + competitor data
-  - Any query where internal knowledge alone OR live search alone is insufficient
-Examples: "Valencia vs Luxe sofa", "Help me with Valencia sofa",
-          "Best sofa under 50k", "Customer says Wakefit is cheaper than our pillow"
-→ Set needs_internal_docs=true, needs_live_data=true
-
-═══════════════════════════════════════════════════════
-ROUTING RULES (apply in order):
-═══════════════════════════════════════════════════════
-1. Incoherent/random → gibberish
-2. Pure greeting/small talk → chit_chat
-3. Needs both stable knowledge + live data → sales_assist
-4. Needs only stable company knowledge → internal
-5. Needs only current/live data → live
-6. Uncertain → sales_assist (safest default, runs everything)
-
-═══════════════════════════════════════════════════════
-OUTPUT — return ONLY this JSON, no explanation:
-═══════════════════════════════════════════════════════
+Return ONLY this JSON:
 {{
-  "gibberish":           true | false,
-  "conversation_type":   "chit_chat" | "work_query",
+  "gibberish": true | false,
+  "conversation_type": "chit_chat" | "work_query",
   "needs_internal_docs": true | false,
-  "needs_live_data":     true | false,
-  "topic": "<max 6 words, empty string if chit_chat or gibberish>"
+  "needs_live_data": false,
+  "query_parts": [
+    {{"question": "<sub-question>", "type": "product" | "process"}}
+  ],
+  "topic": "<main subject in max 4 words>",
+  "is_multi_part": true | false
 }}
 
 User query: {user_query}"""
@@ -340,8 +289,8 @@ User query: {user_query}"""
                 doc_category = "internal"
             else:
                 # Both false — LLM unsure, run everything
-                doc_category = "sales_assist"
-                needs_live = True
+                doc_category = "internal"
+                needs_live = False
                 needs_internal = True
 
         print(f"[Parser] gibberish={gibberish} | conv={conv_type} | "
@@ -352,8 +301,8 @@ User query: {user_query}"""
             "query_type":     query_type,
             "doc_category":   doc_category,
             "topic":          topic,
-            "needs_live":     needs_live,
-            "needs_internal": needs_internal,
+            "needs_live":     False,
+            "needs_internal": True,
         }
 
     except Exception as e:
@@ -372,11 +321,9 @@ User query: {user_query}"""
 # =============================================================================
 
 def rewrite_query(user_query: str, memory_block: str, parsed: dict) -> str:
-    """Resolves pronouns and rewrites query based on route type."""
+    """Resolves pronouns and rewrites query based on subject continuity."""
 
-    query_type     = parsed.get("query_type")
-    needs_live     = parsed.get("needs_live")
-    needs_internal = parsed.get("needs_internal")
+    query_type = parsed.get("query_type")
 
     # ── Branch 1: Conversational — no rewrite needed ─────────────────────────
     if query_type in ("conversational", "informational"):
@@ -386,49 +333,22 @@ def rewrite_query(user_query: str, memory_block: str, parsed: dict) -> str:
     if not memory_block:
         return user_query
 
-    # ── Branch 2: Live only (price / stock / competitor) ─────────────────────
-    if needs_live and not needs_internal:
-        prompt = f"""Rewrite the query into a clear, self-contained web search query.
-IMPORTANT RULES:
-- Conversation history is ordered from oldest → latest
-- The LAST turn is the most recent and most important
-- Resolve pronouns ("this", "it", "those") using the most recent relevant entity
-- Include brand names, product names, or competitor names explicitly
-- Optimise for a Google search (concise, keyword-rich)
-Return ONLY the rewritten query.
-History:
-{memory_block}
-Query: {user_query}
-Rewritten:"""
+    # ── Branch 2: All work queries — single internal rewrite logic ───────────
+    prompt = f"""You are a query rewriter for an internal document search system at The Sleep Company.
 
-    # ── Branch 3: Internal only (SOPs, policy, stable specs) ─────────────────
-    elif needs_internal and not needs_live:
-        prompt = f"""Rewrite the query into a clear, self-contained internal document search query.
-IMPORTANT RULES:
-- Conversation history is ordered from oldest → latest
-- The LAST turn is the most recent and most important
-- Resolve pronouns ("this", "it", "those") using the most recent relevant entity
-- Use precise internal terminology (product codes, policy names, SOP titles) where inferable
-- Do NOT add speculation — only what the user is clearly asking
-Return ONLY the rewritten query.
-History:
-{memory_block}
-Query: {user_query}
-Rewritten:"""
+RULES:
+1. Compare the SUBJECT of the new query against the subject in conversation history
+2. Subject = the main entity being discussed (e.g. "Valencia sofa", "leave policy", "SmartGRID mattress")
+3. If SAME subject → resolve pronouns ("it", "this", "those") using history, rewrite as a complete self-contained search query
+4. If DIFFERENT subject → return the new query exactly as-is, no changes, no context injection
+5. Never add information not explicitly present in the query or history
+6. Never guess or speculate about missing details
+7. Return ONLY the rewritten query, no explanation
 
-    # ── Branch 4: Both live + internal (comparison / mixed) ──────────────────
-    else:
-        prompt = f"""Rewrite the query into a clear, self-contained query suitable for both internal document retrieval and a live web search.
-IMPORTANT RULES:
-- Conversation history is ordered from oldest → latest
-- The LAST turn is the most recent and most important
-- Resolve pronouns ("this", "it", "those") using the most recent relevant entity
-- Mention the product/competitor/policy explicitly
-- Balance specificity (for internal docs) with searchability (for web)
-Return ONLY the rewritten query.
-History:
+History (oldest to latest, LAST turn is most recent):
 {memory_block}
-Query: {user_query}
+
+New query: {user_query}
 Rewritten:"""
 
     try:
@@ -441,7 +361,7 @@ Rewritten:"""
         rewritten = resp.choices[0].message.content.strip().replace("```", "").strip()
         if rewritten and rewritten != user_query:
             print(f"[Rewriter] '{user_query}' → '{rewritten}'")
-        return rewritten or user_query          # guard against empty response
+        return rewritten or user_query
     except Exception as e:
         print(f"[Rewriter] Failed ({e}) — using original query")
         return user_query
@@ -453,9 +373,12 @@ Rewritten:"""
 def handle_conversational(user_query: str, memory_block: str = "") -> str:
     if not memory_block:
         prompt = f"""You are a friendly assistant for 'The Sleep Company'.
-Respond warmly and naturally to the greeting in 1-2 sentences.
-Mention you are there for assistance. Do NOT mention products, SOPs, or policies unless the user asks.
-Just greet back and offer to help.
+RULES:
+- Respond in 2-3 lines max
+- Professional, warm tone
+- If previous conversation had a topic, offer to continue
+- Never mention products unprompted
+- Never use filler phrases like "Great question!"
 User message: {user_query}"""
     else:
         prompt = f"""You are a helpful assistant for 'The Sleep Company'.
@@ -709,43 +632,36 @@ Always resolve references like "this", "that", "it" using the most recent releva
 # STEP 8 — GROQ LLM (internal-doc-grounded answers)
 # =============================================================================
 
-GROQ_SYSTEM_PROMPT = """You are an internal assistant for sales representatives
-and employees of 'The Sleep Company'.
+GROQ_SYSTEM_PROMPT = """You are SalesAssist, an internal bot for The Sleep Company sales reps.
 
-Your role:
-- Help with product recommendations
-- Answer SOP, policy, and training-related questions
-- Assist sales reps in customer conversations
+QUERY HANDLING:
+1. Decompose query into sub-questions. Tag each as PRODUCT or PROCESS.
+2. If multiple parts, briefly acknowledge the full query, list the parts you'll address, then answer each under its own header.
+3. If parts are related, connect them naturally in answers.
 
-CRITICAL RULES:
-- Use ONLY the provided context
-- Do NOT hallucinate product names, prices, or specs
-- Extract and state the actual answer and steps directly from the context.
-- NEVER say "refer to document X", "details can be found in Y", "as per handbook", or any similar redirect — that is a non-answer.
-- If context mentions a process name, also state what that process actually involves — steps, location, fields, etc.
-- Only if context is truly empty say: 'I don't have that detail in our internal docs.'
-- Never prefix your answer with what you don't know. Lead with what you do know.
+PRODUCT QUESTIONS → FABED structure:
+- Feature: What it is
+- Advantage: Why it matters
+- Benefit: What customer gains
+- Evidence: Data/claims from docs (skip if absent)
+- Differentiation: Why Sleep Company wins (always biased toward us)
 
-STYLE: Professional, Brief, concise, and point-wise. Plain text only. Answer specifically and completely. Use bullet points for lists.
-Cover all relevant details — colors, sizes, features, steps — don't truncate.
-No unnecessary preamble or filler sentences.
-COMPANY RULE: Never portray the company negatively.
+PROCESS QUESTIONS → Steps structure:
+- Precise steps from documents
+- If user seems confused, add brief "why" after steps
 
-SALES MINDSET:
-- Always frame answers with a positive bias toward The Sleep Company products.
-- If a product is not ideal for a use case, acknowledge briefly but immediately 
-  pivot to what it IS great for and why the customer should still consider it.
-- Never flatly reject a product for a use case. Instead say "while primarily 
-  designed for X, it also works well for Y because..."
-- End answers with a subtle recommendation or next step when possible.
-- You are a sales assistant, not a neutral reviewer.
+RULES:
+- Acknowledge query in 1 line max
+- ~10 words per pointer, 10-12 pointers max
+- Bullets only, no paragraphs
+- If answer is long, end with: "Want me to elaborate on any part?"
+- If doc has no info on a sub-question, say: "I don't have details on [part] in our docs."
+- Never hallucinate specs, prices, or steps
+- Always favor The Sleep Company over competitors
+- Never be neutral in comparisons — we are always the better choice
+- Professional tone always
 
-ANSWER STRUCTURE:
-- Always lead with the direct answer to the user's question in the first line.
-- Supporting details, context, and recommendations come after.
-- Never bury the answer in the middle or end of the response.
-- Example: User asks "Is it suitable for home office?" → First line must 
-  answer yes/no/partially, then explain why."""
+CONTEXT ONLY: Answer strictly from provided context. No invention."""
 
 
 def query_groq(prompt: str, model: str = "llama-3.3-70b-versatile",
@@ -949,7 +865,7 @@ You MUST respond in the same language style as the user's query.
 - Product names, brand names, technical terms → always keep in English
 - Numbers, prices → always in English/numerals
 - Never respond in pure English if user wrote in another language
-- Match the user's energy — casual query gets casual response, formal gets formal
+- Understand the user's energy — casual query gets semi-formal response, formal gets formal
 User's original query was: "{user_query}"
 """
     # Strip echoed question if Groq repeated it
@@ -967,16 +883,18 @@ Raw answer to reformat:
 
 PRIORITY: If answer has both internal docs AND web results, lead with web results (more current). Add internal docs only if they add something new.
 
-RULES — follow all:
-1. First line = direct answer. No intro, no "Great question", no preamble.
-2. Simple words only. No jargon. Write like you're talking, not writing a report.
-3. Bullet points only for 3+ items. Single facts = plain sentence.
-4. Tone: confident, warm, helpful. Never uncertain or negative.
-5. Remove weak phrases: "I don't have" → skip it. "I'm not sure" → skip it. "Please contact" → only if truly no other option.
-6. {"End with a natural sales nudge — suggest the product briefly." if doc_category in ("live", "sales_assist") else "No sales pitch. End when the answer is complete."}
-7. Max 150 words. Must be complete — don't cut off mid-answer.
-8. For comparisons — cover both products before ending.
-9. Never start by repeating the question.
+RULES:
+1. First line: 1-sentence acknowledgement of the full query
+2. If multi-part: list the parts briefly, then answer each under a bold header
+3. Each pointer: ~10 words max
+4. Max 10-12 pointers total across entire response
+5. Bullets only, no paragraphs
+6. If response is genuinely long, add at end: "Want me to elaborate on any part?"
+7. If a part has no doc info, add: "I don't have details on [part] in our docs."
+8. Professional tone, Sleep Company always wins in comparisons
+9. Never add info not in the raw answer
+10. No filler, no preamble beyond the acknowledgement
+11. Avoid Jargons; if necessary, explain that as well.
 
 OUTPUT: Only the formatted answer. Nothing else."""
     try:
@@ -1129,14 +1047,20 @@ async def parallel_retrieve_and_answer_async(
     # ── Phase 2: Run Groq + Gemini in parallel ────────────────────────────────
     # Groq — only if internal needed and DB has content
     if needs_internal and db_chunks:
-        groq_prompt = (
-            f"{memory_section}"
-            f"Extract the specific answer from the context below.\n"
-            f"State exact steps, process names, field names, and locations.\n"
-            f"Do NOT say 'refer to document' or 'see handbook' — pull the actual content out.\n"
-            f"--- CONTEXT ---\n{db_context}\n---------------\n"
-            f"Question: {user_query}\nAnswer:"
-        )
+        query_parts = parsed.get("query_parts", [])
+parts_block = "\n".join([f"- [{p['type'].upper()}] {p['question']}" for p in query_parts]) if query_parts else user_query
+is_multi = parsed.get("is_multi_part", False)
+
+groq_prompt = (
+    f"{memory_section}"
+    f"{'This query has multiple parts — answer each under its own header.' if is_multi else ''}\n"
+    f"Sub-questions to address:\n{parts_block}\n\n"
+    f"For PRODUCT parts use FABED structure.\n"
+    f"For PROCESS parts use precise steps from documents.\n"
+    f"Do NOT say 'refer to document' — extract actual content.\n"
+    f"--- CONTEXT ---\n{db_context}\n---------------\n"
+    f"Full query: {user_query}\nAnswer:"
+)
         loop      = asyncio.get_event_loop()
         groq_task = loop.run_in_executor(None, query_groq, groq_prompt)
     else:
@@ -1207,16 +1131,18 @@ def parallel_retrieve_and_answer(
 # =============================================================================
 
 def generate_followups(user_query: str, answer: str) -> list[str]:
-    prompt = f"""Based on this Q&A from a Sleep Company assistant, suggest 3 short follow-up questions.
+    prompt = f"""Generate 3 follow-up questions a Sleep Company sales rep might ask next.
 
-Question: {user_query}
-Answer: {answer}
+Q: {user_query}
+A: {answer}
 
-Rules:
-- Each question under 10 words
-- Specific to the topic discussed
-- Return ONLY a JSON array of 3 strings, no explanation
-Example: ["What is the warranty period?", "Is it available in white?", "What's the price?"]"""
+RULES:
+- Each question under 8 words
+- Cover FABED gaps if product answer, or next step gaps if process answer
+- Nudge toward elaboration on the most complex part
+- Return ONLY a JSON array of 3 strings
+
+Example: ["What sizes does it come in?", "How does the trial work?", "How does it beat competitors?"]"""
 
     try:
         resp = groq_client.chat.completions.create(
