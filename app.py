@@ -942,7 +942,7 @@ RULES:
 OUTPUT: Only the polished answer, nothing else."""
     try:
         resp = groq_client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=600,
