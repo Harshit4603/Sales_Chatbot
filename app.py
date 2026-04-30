@@ -388,7 +388,7 @@ Rewritten:"""
 
 def handle_conversational(user_query: str, memory_block: str = "") -> str:
     if not memory_block:
-        prompt = f"""You are a friendly assistant for 'The Sleep Company'.
+        prompt = f"""You are a friendly assistant for 'The Sleep Company' helping sales representative and employees. 
 RULES:
 - Respond in 2-3 lines max
 - Professional, warm tone
