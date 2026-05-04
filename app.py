@@ -884,89 +884,66 @@ async def fetch_gemini_async(user_query: str, db_context: str) -> dict:
 def count_strong(db_chunks: list[dict]) -> int:
     return sum(1 for c in db_chunks if c.get("_score", 0) >= SCORE_THRESHOLD)
 
-def format_final_answer(raw_answer: str, user_query: str, 
+def format_final_answer(raw_answer: str, user_query: str,
                         original_language: str = "english",
                         doc_category: str = "internal") -> str:
-    
-    language_instruction = ""
-    if original_language != "english":
-        language_instruction = f"""
-LANGUAGE & TONE RULES — HIGHEST PRIORITY, FOLLOW EXACTLY:
 
-STEP 1 — DETECT STYLE:
-The user's query was: "{user_query}"
-Detected language tag: {original_language}
-
-Regardless of the detected language tag, YOUR PRIMARY JOB is to match
-the user's actual writing style — not the label.
-
-STEP 2 — SCRIPT RULE (NON-NEGOTIABLE):
-- ALWAYS respond in Roman script (English letters) by default
-- NEVER use native script (Tamil, Telugu, Kannada, Devanagari, Bengali etc.)
-  unless the user has explicitly written in that script themselves
-- If user wrote "smartgrid enna pannu" → respond in Roman Tamil, NOT "இந்த தொழில்நுட்பம்"
-- If user wrote "yeh kya hota hai" → respond in Roman Hindi/Hinglish, NOT "यह क्या होता है"
-
-STEP 3 — TONE RULE:
-- Match the Tone of the user's query exactly
-- Casual query ("enna pannu", "kya hai ye") → Professional, colleague-like response
-- Formal query → professional response
-- NEVER respond in literary or formal regional language for casual queries
-
-STEP 4 — LANGUAGE MIXING GUIDE:
-- Tamil+English (Tanglish):  "SmartGRID oru patented technology, 500+ air channels irukku, extra comfort kudukum"
-- Telugu+English (Tenglish): "SmartGRID oka patented technology, 500+ air channels untayi, extra comfort istundi"
-- Kannada+English (Kanglish):"SmartGRID ondu patented technology, 500+ air channels ide, extra comfort kottide"
-- Hindi+English (Hinglish):  "SmartGRID ek patented technology hai, 500+ air channels hain, extra comfort milta hai"
-- Marathi+English:           "SmartGRID ek patented technology aahe, 500+ air channels aahet, extra comfort milto"
-- If language is ambiguous → default to Hinglish in Roman script
-
-STEP 5 — ALWAYS IN ROMAN:
-- Product names → English always (SmartGRID, not ஸ்மார்ட்கிரிட்)
-- Numbers, prices → English numerals always
-- Technical terms → English always
-- Filler/connectors → in user's language but Roman script
-
-STEP 6 — NEVER DO THIS:
-- Never write full sentences in native script unless user did so first
-- Never use literary language for any queries
-- Never ignore the user's tone and respond more formally than they asked
-"""
     # Strip echoed question if Groq repeated it
     if raw_answer.lower().startswith(user_query[:30].lower()):
         raw_answer = raw_answer[len(user_query):].strip()
-    prompt = f"""You are polishing a response from SalesAssist, an internal assistant for The Sleep Company sales reps.
-{language_instruction}
-Rep asked: "{user_query}"
 
-Raw answer to polish:
+    if original_language == "english":
+        prompt = f"""You are lightly polishing a response for The Sleep Company's internal sales assistant.
+
+User asked: "{user_query}"
+
+Raw answer:
 ---
 {raw_answer}
 ---
 
-YOUR JOB:
-Transform the raw answer into something that feels like a knowledgeable senior colleague speaking — not a formatted template being filled out.
+RULES:
+- Fix bullet formatting — every point must start with •
+- Use **bold** only for product names and key features
+- Trim filler, keep insights sharp (~10-20 words per bullet, 12 bullets max)
+- Warm, collegial tone — senior colleague, not a manual
+- Never add new information
+- End with "Want me to go deeper on any part of this?" only if answer is long
+
+OUTPUT: Only the polished answer."""
+
+    else:
+        language_guide = {
+            "hinglish":  "Hindi+English Roman: 'SmartGRID ek patented tech hai, extra comfort milta hai'",
+            "marathi":   "Marathi+English Roman: 'SmartGRID ek patented tech aahe, extra comfort milto'",
+            "tamil":     "Tamil+English Roman: 'SmartGRID oru patented tech, extra comfort kudukum'",
+            "telugu":    "Telugu+English Roman: 'SmartGRID oka patented tech, extra comfort istundi'",
+            "kannada":   "Kannada+English Roman: 'SmartGRID ondu patented tech, extra comfort kottide'",
+        }.get(original_language, "Hinglish Roman script by default")
+
+        prompt = f"""You are rewriting a response for The Sleep Company's internal sales assistant.
+The user wrote in {original_language}. Match their language and tone exactly.
+
+User asked: "{user_query}"
+Language style to use: {language_guide}
+
+Raw answer to rewrite:
+---
+{raw_answer}
+---
 
 RULES:
-1. Keep the opening acknowledgement natural, courteous and confident — 1 line, like a colleague who instantly gets the question
-2. Never show FABED labels — Feature, Advantage, Benefit, Evidence, Differentiation should be invisible. Just let the answer naturally cover these aspects
-3. Bullets for clarity but each bullet should feel like genuine insight
-4. ~10-20 words per bullet, 10-12 bullets max across entire response
-5. If multi-part query: briefly tell user what you'll cover, use subtle headers only where genuinely needed, connect related parts
-6. If answer is long: end with "Want me to go deeper on any part of this?"
-7. If a part has no doc info: "I don't have specifics on that part right now" — move on
-8. Never add information not in the raw answer
-9. Professional but warm tone — senior colleague, not a manual
-10. End with momentum — toward a sale, trial, or next question
-11. Never start with "Great question!" or similar hollow openers
-12. In comparisons — we always come out ahead
-13. Always complete the last bullet fully — never cut off mid-sentence
-14. MANDATORY: Every point MUST start with a bullet (•) — no paragraphs ever
-15. Use **bold** for key product names and standout features only
-16. Never write two consecutive sentences without a bullet between them
-17. {f"LANGUAGE FIRST — Write EVERY bullet in the language/script specified above. English-only bullets are a violation." if original_language != "english" else "Keep natural English tone"}
+- Start response with warm acknowledgement of question.
+- Rewrite every bullet in {original_language} mixed with English (Roman script ONLY — never native script)
+- Product names, numbers, technical terms → always in English
+- Match the user's tone exactly (casual query = collegial response, not formal)
+- Every point must start with •, use **bold** for product names only
+- ~10-20 words per bullet, 12 bullets max
+- Never add new information
+- End with a natural closing line in {original_language}
 
-OUTPUT: Only the polished answer, nothing else."""
+OUTPUT: Only the rewritten answer."""
+
     try:
         resp = groq_client.chat.completions.create(
             model="qwen/qwen3-32b",
@@ -979,7 +956,7 @@ OUTPUT: Only the polished answer, nothing else."""
             result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
             if '<think>' in result:
                 result = result[:result.index('<think>')].strip()
-        return result
+        return result or raw_answer
     except Exception as e:
         print(f"[Formatter] Failed ({e}) — returning raw answer")
         return raw_answer
