@@ -974,7 +974,9 @@ OUTPUT: Only the polished answer, nothing else."""
             temperature=0.2,
             max_tokens=600,
         )
-        return resp.choices[0].message.content.strip()
+        result = resp.choices[0].message.content.strip()
+        result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+        return result
     except Exception as e:
         print(f"[Formatter] Failed ({e}) — returning raw answer")
         return raw_answer
