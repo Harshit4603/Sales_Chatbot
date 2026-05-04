@@ -891,21 +891,46 @@ def format_final_answer(raw_answer: str, user_query: str,
     language_instruction = ""
     if original_language != "english":
         language_instruction = f"""
-LANGUAGE RULE — VERY IMPORTANT:
-User wrote in: {original_language}
-You MUST respond in the same language style as the user's query.
-- If user wrote in Hindi/Hinglish → respond in Hinglish (Hindi+English mix)
-  Example: "Hum mattress, sofa, pillow aur recliner bechte hain. Elite Sofa sabse popular hai."
-- If user wrote in pure Hindi → respond in Hindi with product names in English
-  Example: "हम mattress, sofa और pillow बेचते हैं।"
-- If user wrote in any regional language (Marathi, Tamil, Telugu, Gujarati etc.) 
-  → respond in that language mixed with English product names
-  Example Marathi: "Aapan mattress, sofa ani pillow vikto. Elite Sofa khup popular ahe."
-- Product names, brand names, technical terms → always keep in English
-- Numbers, prices → always in English/numerals
-- Never respond in pure English if user wrote in another language
-- Understand the user's energy — casual query gets semi-formal response, formal gets formal
-User's original query was: "{user_query}"
+LANGUAGE & TONE RULES — HIGHEST PRIORITY, FOLLOW EXACTLY:
+
+STEP 1 — DETECT STYLE:
+The user's query was: "{user_query}"
+Detected language tag: {original_language}
+
+Regardless of the detected language tag, YOUR PRIMARY JOB is to match
+the user's actual writing style — not the label.
+
+STEP 2 — SCRIPT RULE (NON-NEGOTIABLE):
+- ALWAYS respond in Roman script (English letters) by default
+- NEVER use native script (Tamil, Telugu, Kannada, Devanagari, Bengali etc.)
+  unless the user has explicitly written in that script themselves
+- If user wrote "smartgrid enna pannu" → respond in Roman Tamil, NOT "இந்த தொழில்நுட்பம்"
+- If user wrote "yeh kya hota hai" → respond in Roman Hindi/Hinglish, NOT "यह क्या होता है"
+
+STEP 3 — TONE RULE:
+- Match the Tone of the user's query exactly
+- Casual query ("enna pannu", "kya hai ye") → Professional, colleague-like response
+- Formal query → professional response
+- NEVER respond in literary or formal regional language for casual queries
+
+STEP 4 — LANGUAGE MIXING GUIDE:
+- Tamil+English (Tanglish):  "SmartGRID oru patented technology, 500+ air channels irukku, extra comfort kudukum"
+- Telugu+English (Tenglish): "SmartGRID oka patented technology, 500+ air channels untayi, extra comfort istundi"
+- Kannada+English (Kanglish):"SmartGRID ondu patented technology, 500+ air channels ide, extra comfort kottide"
+- Hindi+English (Hinglish):  "SmartGRID ek patented technology hai, 500+ air channels hain, extra comfort milta hai"
+- Marathi+English:           "SmartGRID ek patented technology aahe, 500+ air channels aahet, extra comfort milto"
+- If language is ambiguous → default to Hinglish in Roman script
+
+STEP 5 — ALWAYS IN ROMAN:
+- Product names → English always (SmartGRID, not ஸ்மார்ட்கிரிட்)
+- Numbers, prices → English numerals always
+- Technical terms → English always
+- Filler/connectors → in user's language but Roman script
+
+STEP 6 — NEVER DO THIS:
+- Never write full sentences in native script unless user did so first
+- Never use literary language for any queries
+- Never ignore the user's tone and respond more formally than they asked
 """
     # Strip echoed question if Groq repeated it
     if raw_answer.lower().startswith(user_query[:30].lower()):
