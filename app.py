@@ -964,6 +964,7 @@ RULES:
 14. MANDATORY: Every point MUST start with a bullet (•) — no paragraphs ever
 15. Use **bold** for key product names and standout features only
 16. Never write two consecutive sentences without a bullet between them
+17. {f"LANGUAGE FIRST — Write EVERY bullet in the language/script specified above. English-only bullets are a violation." if original_language != "english" else "Keep natural English tone"}
 
 OUTPUT: Only the polished answer, nothing else."""
     try:
