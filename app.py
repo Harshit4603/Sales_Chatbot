@@ -975,7 +975,10 @@ OUTPUT: Only the polished answer, nothing else."""
             max_tokens=600,
         )
         result = resp.choices[0].message.content.strip()
-        result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+        if '<think>' in result:
+            result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+            if '<think>' in result:
+                result = result[:result.index('<think>')].strip()
         return result
     except Exception as e:
         print(f"[Formatter] Failed ({e}) — returning raw answer")
