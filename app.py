@@ -118,7 +118,7 @@ class ChatRequest(BaseModel):
     employee_id: str
     session_id:  str | None = None
     query:       str
-    role:        str | None = None   # "sales" | "employee"
+    role:        str = "sales"
 
 class RatingRequest(BaseModel):
     rating: str
@@ -150,13 +150,9 @@ COMPARISON_SIGNALS = {
     "against",
 }
 
-# doc_categories that are "internal-only" — DB is authoritative
-INTERNAL_CATEGORIES = {"policy", "sop", "training"}
-
 # Role-based Pinecone filter
 ROLE_CATEGORY_ALLOW = {
-    "sales":    {"product", "pricing", "faq", "general"},
-    "employee": {"product", "policy", "sop", "training", "pricing", "faq", "general"},
+    "sales": {"product", "pricing", "faq", "general"},
 }
 
 def detect_and_translate(user_query: str) -> dict:
@@ -502,7 +498,6 @@ def retrieve_from_db(
     top_k:        int = SOURCES_ACCESSED,
 ) -> list[dict]:
 
-    # Use product embedding context for sales_assist (best semantic match)
     embed_category = "product" if doc_category in ("sales_assist", "live") else doc_category
     if not embed_category or embed_category == "none":
         embed_category = "general"
@@ -514,40 +509,22 @@ def retrieve_from_db(
     except Exception as e:
         print(f"[Retrieval] Embedding failed: {e}")
         return []
+
     if doc_category in ("internal", "sales_assist"):
         hyde_text  = generate_hypothetical_answer(user_query, doc_category)
         embed_text = build_query_embed_text(hyde_text, embed_category, topic)
-    else:
-        embed_text = build_query_embed_text(user_query, embed_category, topic)
-        embedding      = get_embedding_with_retry(embed_text)
+        embedding  = get_embedding_with_retry(embed_text)
 
-    allowed_categories = ROLE_CATEGORY_ALLOW.get(role) if role else None
-    pinecone_filter    = {}
+    pinecone_filter = {}
 
-    # ── Build Pinecone filter ─────────────────────────────────────────────────
     if doc_category == "sales_assist":
-        # Needs both product + internal docs
-        allowed = ["product", "pricing", "faq", "policy", "sop", "training"]
-        if role == "sales":
-            allowed = ["product", "pricing", "faq"]
-        pinecone_filter = {"doc_category": {"$in": allowed}}
+        pinecone_filter = {"doc_category": {"$in": ["product", "pricing", "faq"]}}
 
     elif doc_category == "internal":
-        allowed = ["product", "policy", "sop", "training", "faq"]
-        if role == "sales":
-            allowed = ["product", "faq"]
-        pinecone_filter = {"doc_category": {"$in": allowed}}
+        pinecone_filter = {"doc_category": {"$in": ["product", "faq"]}}
 
     elif doc_category == "live":
-        # Live queries don't hit DB meaningfully
-        # but if they do fallback, pull product chunks
         pinecone_filter = {"doc_category": {"$eq": "product"}}
-
-    elif allowed_categories:
-        pinecone_filter = {"doc_category": {"$in": list(allowed_categories)}}
-
-    else:
-        pinecone_filter = {}
 
     results = index.query(
         vector=embedding,
@@ -557,7 +534,6 @@ def retrieve_from_db(
     )
     matches = results.get("matches", [])
 
-    # Fallback: if filter too narrow, retry without filter
     if len(matches) < 2 and pinecone_filter:
         print(f"[Retrieval] Filter too narrow — falling back to unfiltered")
         results = index.query(vector=embedding, top_k=top_k, include_metadata=True)
@@ -727,7 +703,7 @@ def query_groq(prompt: str, model: str = "llama-3.3-70b-versatile",
 import random
 
 GEMINI_SYSTEM_PROMPT = """You are a helpful internal assistant for 'The Sleep Company',
-supporting sales representatives and employees.
+supporting sales representatives of The Sleep Company.
 
 Rules:
 1. Always prioritise internal company context if provided.
@@ -1373,6 +1349,8 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Employee not found")
     if employee.password_hash != request.password:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    if employee.role not in ("sales", "admin"):
+        raise HTTPException(status_code=403, detail="Access restricted to sales representatives and admins")
     return {"employee_id": employee.employee_id, "name": employee.name, "role": employee.role}
 
 
