@@ -925,20 +925,52 @@ RULES:
 - ~10-20 words per bullet, 12 bullets max
 - Never add new information
 - End with a natural closing line in {original_language}
+OUTPUT: Only the rewritten answer. No thinking, no explanation, no preamble."""
 
-OUTPUT: Only the rewritten answer."""
+    for attempt in range(5):
+        try:
+            resp = groq_client.chat.completions.create(
+                model="qwen/qwen3-32b",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=1200,
+                extra_body={"thinking": {"budget_tokens": 0}},
+            )
+            break
+        except Exception as e:
+            if attempt < 4:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"[Formatter] Failed ({e}) — returning raw answer")
+                return raw_answer
+
     try:
-        resp = groq_client.chat.completions.create(
-            model="qwen/qwen3-32b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=600,
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"[Formatter] Failed ({e}) — returning raw answer")
-        return raw_answer
+        raw_result = resp.choices[0].message.content.strip() if resp.choices else raw_answer
 
+        # Strip <think> blocks — handle closed, unclosed, and missing closing tags
+        result = re.sub(r'<think>.*?</think>', '', raw_result, flags=re.DOTALL).strip()
+        if '<think>' in result:
+            result = result[result.rfind('<think>'):].replace('<think>', '').strip()
+        if not result and '</think>' in raw_result:
+            result = raw_result[raw_result.rfind('</think>') + 8:].strip()
+
+        result = result or raw_answer
+
+        # Language check — if non-english and Qwen returned English anyway, fallback
+        if original_language not in ("english",):
+            hindi_markers = ["hai", "ka", "ki", "ke", "kya", "aur", "nahi", "se", "mein", "ho",
+                             "aahe", "milto", "kudukum", "istundi", "kottide", "kittum",
+                             "chhe", "jay", "mildi", "mile", "powa", "hau"]
+            has_target_lang = any(w in result.lower() for w in hindi_markers)
+            if not has_target_lang:
+                print(f"[Formatter] Language check failed — returning raw answer")
+                return raw_answer
+
+        return result or raw_answer
+
+    except Exception as e:
+        print(f"[Formatter] Result parsing failed ({e}) — returning raw answer")
+        return raw_answer
 def smart_merge(
     user_query:        str,
     doc_category:      str,
