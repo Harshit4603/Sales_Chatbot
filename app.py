@@ -171,7 +171,7 @@ Rules:
 
 Return ONLY valid JSON:
 {{
-  "original_language": "english|hinglish|hindi|marathi|tamil|telugu|gujarati|kannada|bengali|other",
+  "original_language": "english|hinglish|hindi|marathi|tamil|telugu|gujarati|kannada|bengali|malayalam|punjabi|odia|assamese|bhojpuri|other",
   "translated_query": "<translated to English, or original if english/hinglish>",
   "needs_translation": true | false
 }}"""
@@ -890,13 +890,21 @@ OUTPUT: Only the polished answer."""
 
     else:
         language_guide = {
-            "hinglish":  "Hindi+English Roman: 'SmartGRID ek patented tech hai, extra comfort milta hai'",
-            "marathi":   "Marathi+English Roman: 'SmartGRID ek patented tech aahe, extra comfort milto'",
-            "tamil":     "Tamil+English Roman: 'SmartGRID oru patented tech, extra comfort kudukum'",
-            "telugu":    "Telugu+English Roman: 'SmartGRID oka patented tech, extra comfort istundi'",
-            "kannada":   "Kannada+English Roman: 'SmartGRID ondu patented tech, extra comfort kottide'",
+            "hinglish":   "Hindi+English Roman: 'SmartGRID ek patented tech hai, extra comfort milta hai'",
+            "hindi":      "Hindi+English Roman: 'SmartGRID ek patented tech hai, extra comfort milta hai'",
+            "marathi":    "Marathi+English Roman: 'SmartGRID ek patented tech aahe, extra comfort milto'",
+            "tamil":      "Tamil+English Roman: 'SmartGRID oru patented tech, extra comfort kudukum'",
+            "telugu":     "Telugu+English Roman: 'SmartGRID oka patented tech, extra comfort istundi'",
+            "kannada":    "Kannada+English Roman: 'SmartGRID ondu patented tech, extra comfort kottide'",
+            "malayalam":  "Malayalam+English Roman: 'SmartGRID oru patented tech aanu, extra comfort kittum'",
+            "gujarati":   "Gujarati+English Roman: 'SmartGRID ek patented tech chhe, extra comfort male chhe'",
+            "bengali":    "Bengali+English Roman: 'SmartGRID ekta patented tech, extra comfort pawa jay'",
+            "punjabi":    "Punjabi+English Roman: 'SmartGRID ik patented tech hai, extra comfort mildi hai'",
+            "odia":       "Odia+English Roman: 'SmartGRID gote patented tech, extra comfort mile'",
+            "assamese":   "Assamese+English Roman: 'SmartGRID এক patented tech, extra comfort powa jay'",
+            "bhojpuri":   "Bhojpuri+English Roman: 'SmartGRID ek patented tech hau, extra comfort milela'",
         }.get(original_language, "Hinglish Roman script by default")
-
+        
         prompt = f"""You are rewriting a response for The Sleep Company's internal sales assistant.
 The user wrote in {original_language}. Match their language and tone exactly.
 
@@ -919,36 +927,16 @@ RULES:
 - End with a natural closing line in {original_language}
 
 OUTPUT: Only the rewritten answer."""
-
-    for attempt in range(5):
-        try:
-            resp = groq_client.chat.completions.create(
-                model="qwen/qwen3-32b",
-                messages=[
-                    {"role": "system", "content": "You are a language translator and tone rewriter. Your ONLY job is to rewrite the given answer in the specified language and tone. STRICT RULES: Never use internet or web search. Never add any new information, facts, prices, or product details not already present in the raw answer. Only rewrite what is given — nothing more."},
-                    {"role": "user",   "content": prompt},
-                ],
-                temperature=0.2,
-                max_tokens=600,
-            )
-            break  # success, exit retry loop
-        except Exception as e:
-            if attempt < 4:
-                time.sleep(2 ** attempt)
-            else:
-                print(f"[Formatter] Failed ({e}) — returning raw answer")
-                return raw_answer
-
-# This runs only after successful break
     try:
-        result = resp.choices[0].message.content.strip() if resp.choices else raw_answer
-        if '<think>' in result:
-            result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
-            if '<think>' in result:
-                result = result[:result.index('<think>')].strip()
-        return result or raw_answer
+        resp = groq_client.chat.completions.create(
+            model="qwen/qwen3-32b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=600,
+        )
+        return resp.choices[0].message.content.strip()
     except Exception as e:
-        print(f"[Formatter] Result parsing failed ({e}) — returning raw answer")
+        print(f"[Formatter] Failed ({e}) — returning raw answer")
         return raw_answer
 
 def smart_merge(
