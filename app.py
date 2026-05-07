@@ -934,18 +934,22 @@ for attempt in range(5):
         break  # success, exit retry loop
     except Exception as e:
         if attempt < 4:
-            time.sleep(2 ** attempt)  # exponential backoff: 1s, 2s, 4s, 8s
+            time.sleep(2 ** attempt)
         else:
-            raise  # all 5 attempts failed, propagate the error
-        result = resp.text.strip() if resp.text else raw_answer
+            print(f"[Formatter] Failed ({e}) — returning raw answer")
+            return raw_answer
+
+# This runs only after successful break
+try:
+    result = resp.text.strip() if resp.text else raw_answer
+    if '<think>' in result:
+        result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
         if '<think>' in result:
-            result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
-            if '<think>' in result:
-                result = result[:result.index('<think>')].strip()
-        return result or raw_answer
-    except Exception as e:
-        print(f"[Formatter] Failed ({e}) — returning raw answer")
-        return raw_answer
+            result = result[:result.index('<think>')].strip()
+    return result or raw_answer
+except Exception as e:
+    print(f"[Formatter] Result parsing failed ({e}) — returning raw answer")
+    return raw_answer
 
 def smart_merge(
     user_query:        str,
