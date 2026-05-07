@@ -922,14 +922,14 @@ OUTPUT: Only the rewritten answer."""
 
     for attempt in range(5):
         try:
-            resp = genai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    max_output_tokens=600,
-                    system_instruction="You are a language translator and tone rewriter. Your ONLY job is to rewrite the given answer in the specified language and tone. STRICT RULES: Never use internet or web search. Never add any new information, facts, prices, or product details not already present in the raw answer. Only rewrite what is given — nothing more.",
-                )
+            resp = groq_client.chat.completions.create(
+                model="qwen/qwen3-32b",
+                messages=[
+                    {"role": "system", "content": "You are a language translator and tone rewriter. Your ONLY job is to rewrite the given answer in the specified language and tone. STRICT RULES: Never use internet or web search. Never add any new information, facts, prices, or product details not already present in the raw answer. Only rewrite what is given — nothing more."},
+                    {"role": "user",   "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=600,
             )
             break  # success, exit retry loop
         except Exception as e:
@@ -941,7 +941,7 @@ OUTPUT: Only the rewritten answer."""
 
 # This runs only after successful break
     try:
-        result = resp.text.strip() if resp.text else raw_answer
+        result = resp.choices[0].message.content.strip() if resp.choices else raw_answer
         if '<think>' in result:
             result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
             if '<think>' in result:
