@@ -79,7 +79,10 @@ deepseek_client    = OpenAI(
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://ui-index-html.vercel.app"],
+    allow_origins=[
+    "https://ui-index-html-evco4h9ri-harshit4603s-projects.vercel.app",
+    "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
