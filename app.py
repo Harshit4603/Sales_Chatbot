@@ -940,16 +940,16 @@ OUTPUT: Only the rewritten answer."""
                 return raw_answer
 
 # This runs only after successful break
-try:
-    result = resp.text.strip() if resp.text else raw_answer
-    if '<think>' in result:
-        result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+    try:
+        result = resp.text.strip() if resp.text else raw_answer
         if '<think>' in result:
-            result = result[:result.index('<think>')].strip()
-    return result or raw_answer
-except Exception as e:
-    print(f"[Formatter] Result parsing failed ({e}) — returning raw answer")
-    return raw_answer
+            result = re.sub(r'<think>.*?</think>', '', result, flags=re.DOTALL).strip()
+            if '<think>' in result:
+                result = result[:result.index('<think>')].strip()
+        return result or raw_answer
+    except Exception as e:
+        print(f"[Formatter] Result parsing failed ({e}) — returning raw answer")
+        return raw_answer
 
 def smart_merge(
     user_query:        str,
