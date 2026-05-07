@@ -813,7 +813,7 @@ def search_with_gemini(user_query: str, db_context: str = "") -> dict:
         temperature=0.2,
     )
     return {
-        "answer": (fallback or "Please visit https://thesleepcompany.in for the latest info.")
+        "answer": fallback or "Please visit https://thesleepcompany.in for the latest info.",
         "web_sources": [],
     }
 
