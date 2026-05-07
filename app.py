@@ -931,10 +931,12 @@ OUTPUT: Only the rewritten answer. No thinking, no explanation, no preamble."""
         try:
             resp = groq_client.chat.completions.create(
                 model="qwen/qwen3-32b",
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "You are a translator. Output ONLY the final rewritten answer. Do not think out loud. Do not use <think> tags. No preamble, no explanation."},
+                    {"role": "user", "content": prompt},
+                ],
                 temperature=0.2,
                 max_tokens=1200,
-                extra_body={"thinking": {"budget_tokens": 0}},
             )
             break
         except Exception as e:
