@@ -920,24 +920,24 @@ RULES:
 
 OUTPUT: Only the rewritten answer."""
 
-for attempt in range(5):
-    try:
-        resp = genai_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=600,
-                system_instruction="You are a language translator and tone rewriter. Your ONLY job is to rewrite the given answer in the specified language and tone. STRICT RULES: Never use internet or web search. Never add any new information, facts, prices, or product details not already present in the raw answer. Only rewrite what is given — nothing more.",
+    for attempt in range(5):
+        try:
+            resp = genai_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=600,
+                    system_instruction="You are a language translator and tone rewriter. Your ONLY job is to rewrite the given answer in the specified language and tone. STRICT RULES: Never use internet or web search. Never add any new information, facts, prices, or product details not already present in the raw answer. Only rewrite what is given — nothing more.",
+                )
             )
-        )
-        break  # success, exit retry loop
-    except Exception as e:
-        if attempt < 4:
-            time.sleep(2 ** attempt)
-        else:
-            print(f"[Formatter] Failed ({e}) — returning raw answer")
-            return raw_answer
+            break  # success, exit retry loop
+        except Exception as e:
+            if attempt < 4:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"[Formatter] Failed ({e}) — returning raw answer")
+                return raw_answer
 
 # This runs only after successful break
 try:
