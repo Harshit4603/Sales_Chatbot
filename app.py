@@ -9,6 +9,7 @@ from openai import OpenAI
 
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from groq import Groq
@@ -1412,6 +1413,47 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         "followups"   : followups,
     }
 
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
+    # Reuse all existing session + memory logic
+    session = None
+    if request.session_id:
+        try:
+            session = db.query(ChatSession).filter(
+                ChatSession.session_id == request.session_id
+            ).first()
+        except: session = None
+
+    if not session:
+        session = ChatSession(employee_id=request.employee_id)
+        db.add(session); db.commit(); db.refresh(session)
+
+    memory_block = build_memory_block(str(session.session_id), db)
+    answer, sources = process_query(request.query, memory_block, role=request.role)
+
+    # Save to DB
+    message = ChatMessage(
+        session_id=session.session_id,
+        employee_id=request.employee_id,
+        query=request.query,
+        answer=answer,
+        used_internet=False,
+    )
+    db.add(message); session.last_active_at = get_ist()
+    db.commit(); db.refresh(message)
+
+    followups = generate_followups(request.query, answer)
+
+    async def generate():
+        # Stream word by word
+        for word in answer.split(" "):
+            yield f"data: {json.dumps({'type': 'token', 'content': word + ' '})}\n\n"
+            await asyncio.sleep(0.03)
+
+        # Final metadata chunk
+        yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.patch("/chat/{message_id}/rate")
 def rate_message(message_id: str, request: RatingRequest, db: Session = Depends(get_db)):
