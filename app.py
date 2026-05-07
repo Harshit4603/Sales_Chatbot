@@ -737,7 +737,7 @@ def search_with_gemini(user_query: str, db_context: str = "") -> dict:
     """
     if db_context.strip():
         user_message = (
-            f"Internal company context (PRIMARY — use this first):\n"
+            f"Internal company context (PRIMARY - use this first):\n"
             f"---\n{db_context[:4000]}\n---\n\n"
             f"User question: {user_query}\n\n"
             f"Answer using internal context first. If colors, variants, live pricing, "
@@ -814,7 +814,6 @@ def search_with_gemini(user_query: str, db_context: str = "") -> dict:
     )
     return {
         "answer": (fallback or "Please visit https://thesleepcompany.in for the latest info.")
-                  ,
         "web_sources": [],
     }
 
