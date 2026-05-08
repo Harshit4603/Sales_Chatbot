@@ -679,7 +679,10 @@ TONE RULES:
 STRICT RULES:
 - Answer only from provided context
 - Never invent specs, prices, or steps
-- If docs have nothing, say so briefly and move on"""
+- If docs have nothing, say so briefly and move on
+- Use grammatically correct, complete English sentences in every bullet — no fragments, no run-ons, no missing articles, no awkward phrasing
+- Every bullet must be proofread mentally before output: subject, verb, object must all be present and agree
+- Never drop articles ("a", "an", "the") or prepositions — write like a native English speaker would"""
 
 
 def query_groq(prompt: str, model: str = "llama-3.3-70b-versatile",
@@ -882,14 +885,16 @@ Raw answer:
 ---
 
 RULES:
+- Fix ALL grammatical errors — missing articles, subject-verb disagreement, sentence fragments, run-on sentences, incorrect tense, misplaced prepositions
+- Every bullet must read like a complete, fluent English sentence a native speaker would write
 - Fix bullet formatting — every point must start with •
 - Use **bold** only for product names and key features
 - Trim filler, keep insights sharp (~10-20 words per bullet, 12 bullets max)
 - Warm, collegial tone — senior colleague, not a manual
-- Never add new information
+- Never add new information — only fix grammar, phrasing, and formatting
 - End with "Want me to go deeper on any part of this?" only if answer is long
 
-OUTPUT: Only the polished answer."""
+OUTPUT: Only the polished, grammatically correct answer."""
 
     else:
         language_guide = {
@@ -922,6 +927,7 @@ Raw answer to rewrite:
 RULES:
 - Start response with warm acknowledgement of question.
 - Rewrite every bullet in {original_language} mixed with English (Roman script ONLY — never native script)
+- Fix any grammatical errors in both the English and {original_language} portions — ensure natural, fluent phrasing
 - Product names, numbers, technical terms → always in English
 - Match the user's tone exactly (casual query = collegial response, not formal)
 - Every point must start with •, use **bold** for product names only
