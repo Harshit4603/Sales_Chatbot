@@ -175,7 +175,8 @@ Rules:
 Return ONLY valid JSON:
 {{
   "original_language": "english|hinglish|hindi|marathi|tamil|telugu|gujarati|kannada|bengali|malayalam|punjabi|odia|assamese|bhojpuri|other",
-  "translated_query": "<translated to English, or original if english/hinglish>",
+  # CORRECT
+"translated_query": "<English translation of the query, or original if English>",
   "needs_translation": true | false
 }}"""
 
@@ -201,7 +202,7 @@ Return ONLY valid JSON:
               f"needs_translation={result.get('needs_translation')}")
         return {
             "original_language": result.get("original_language", "english"),
-            "translated_query":  result.get("translated_query", user_query),
+            "translated_query": result.get("translated_query") or user_query,
             "needs_translation": bool(result.get("needs_translation", False))
         }
     except Exception as e:
@@ -324,12 +325,12 @@ User query: {user_query}"""
         }
            
     except Exception as e:
-        print(f"[Parser] Failed ({e}) — defaulting to retrieval/sales_assist")
+        print(f"[Parser] Failed ({e}) — defaulting to retrieval/internal")
         return {
             "query_type":     "retrieval",
-            "doc_category":   "sales_assist",
+            "doc_category":   "internal",
             "topic":          "",
-            "needs_live":     True,
+            "needs_live":     False,
             "needs_internal": True,
         }
 
