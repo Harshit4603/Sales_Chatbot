@@ -889,7 +889,8 @@ Raw answer:
 RULES:
 - Fix ALL grammatical errors — missing articles, subject-verb disagreement, sentence fragments, run-on sentences, incorrect tense, misplaced prepositions
 - Every bullet must read like a complete, fluent English sentence a native speaker would write
-- Fix bullet formatting — every point must start with •
+# To this
+- Fix bullet formatting — every point must start with - (hyphen)
 - Use **bold** only for product names and key features
 - Trim filler, keep insights sharp (~10-20 words per bullet, 12 bullets max)
 - Warm, collegial tone — senior colleague, not a manual
@@ -932,7 +933,7 @@ RULES:
 - Fix any grammatical errors in both the English and {original_language} portions — ensure natural, fluent phrasing
 - Product names, numbers, technical terms → always in English
 - Match the user's tone exactly (casual query = collegial response, not formal)
-- Every point must start with •, use **bold** for product names only
+- Fix bullet formatting — every point must start with - (hyphen), use **bold** for product names only
 - ~10-20 words per bullet, 12 bullets max
 - Never add new information
 - End with a natural closing line in {original_language}
@@ -1262,10 +1263,20 @@ def process_query(
     role:         str | None = None,
 ) -> tuple[str, dict]:
 
+        # ── Guard 1: Empty input ──────────────────────────────────
+    if not user_query or not user_query.strip():
+        return ("I didn't quite understand that. Could you rephrase?",
+                {"db_sources": [], "web_sources": []})
+
     # ── Language detection + translation ──────────────────────────────────────
     lang_result       = detect_and_translate(user_query)
     original_language = lang_result["original_language"]
     query_for_pipeline = lang_result["translated_query"]
+
+    if original_language == "other" and not query_for_pipeline.strip():
+        print("[Pipeline] Unknown language, empty translation — gibberish")
+        return ("I didn't quite understand that. Could you rephrase?",
+                {"db_sources": [], "web_sources": []})
 
     parsed     = parse_query(query_for_pipeline)
     query_type = parsed["query_type"]
@@ -1488,10 +1499,12 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     followups = generate_followups(request.query, answer)
 
     async def generate():
-        # Stream word by word
-        for word in answer.split(" "):
+    for line in answer.split("\n"):
+        for word in line.split(" "):
             yield f"data: {json.dumps({'type': 'token', 'content': word + ' '})}\n\n"
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.02)
+        # Send the newline as its own token to preserve bullet structure
+        yield f"data: {json.dumps({'type': 'token', 'content': '\n'})}\n\n"
 
         # Final metadata chunk
         yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups})}\n\n"
