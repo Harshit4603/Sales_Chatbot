@@ -1499,17 +1499,15 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     followups = generate_followups(request.query, answer)
 
     async def generate():
-        for line in answer.split("\n"):
-            for word in line.split(" "):
-                yield f"data: {json.dumps({'type': 'token', 'content': word + ' '})}\n\n"
-                await asyncio.sleep(0.02)
-            # Send the newline as its own token to preserve bullet structure
-            yield f"data: {json.dumps({'type': 'token', 'content': '\n'})}\n\n"
-    
-            # Final metadata chunk
-            yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups})}\n\n"
-    
-        return StreamingResponse(generate(), media_type="text/event-stream")
+    for line in answer.split("\n"):
+        for word in line.split(" "):
+            yield f"data: {json.dumps({'type': 'token', 'content': word + ' '})}\n\n"
+            await asyncio.sleep(0.02)
+        yield f"data: {json.dumps({'type': 'token', 'content': '\n'})}\n\n"
+
+    yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups})}\n\n"
+
+return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.patch("/chat/{message_id}/rate")
 def rate_message(message_id: str, request: RatingRequest, db: Session = Depends(get_db)):
