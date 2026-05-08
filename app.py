@@ -1469,7 +1469,6 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
-    # Reuse all existing session + memory logic
     session = None
     if request.session_id:
         try:
@@ -1485,7 +1484,6 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     memory_block = build_memory_block(str(session.session_id), db)
     answer, sources = process_query(request.query, memory_block, role=request.role)
 
-    # Save to DB
     message = ChatMessage(
         session_id=session.session_id,
         employee_id=request.employee_id,
@@ -1499,16 +1497,15 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     followups = generate_followups(request.query, answer)
 
     async def generate():
-    for line in answer.split("\n"):
-        for word in line.split(" "):
-            yield f"data: {json.dumps({'type': 'token', 'content': word + ' '})}\n\n"
-            await asyncio.sleep(0.02)
-        yield f"data: {json.dumps({'type': 'token', 'content': '\n'})}\n\n"
+        for line in answer.split("\n"):
+            for word in line.split(" "):
+                yield f"data: {json.dumps({'type': 'token', 'content': word + ' '})}\n\n"
+                await asyncio.sleep(0.02)
+            yield f"data: {json.dumps({'type': 'token', 'content': '\n'})}\n\n"
+        yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups})}\n\n"
 
-    yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups})}\n\n"
-
-return StreamingResponse(generate(), media_type="text/event-stream")
-
+    return StreamingResponse(generate(), media_type="text/event-stream")
+    
 @app.patch("/chat/{message_id}/rate")
 def rate_message(message_id: str, request: RatingRequest, db: Session = Depends(get_db)):
     message = db.query(ChatMessage).filter(
