@@ -662,8 +662,10 @@ HOW TO WRITE:
 - Always complete your last bullet fully — never end mid-sentence
 - Use **text** for key product names, standout features, and important differentiators
 - Never bold every bullet — only what deserves emphasis
-- NEVER write in paragraphs — bullets only, always
+- NEVER write in paragraphs — bullets or tables only, always
 - Every single point must be a bullet, no exceptions
+- Use a markdown table when comparing multiple products, features, specs, or options side by side
+- Table format: | Column | Column | with a separator row |---|---| always
 
 MULTI-PART QUERIES:
 - Acknowledge the full query in one natural line
