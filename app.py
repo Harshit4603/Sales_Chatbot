@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import re
 from openai import OpenAI
 
+from product_images import fetch_product_image
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -1308,6 +1309,9 @@ def process_query(
     original_query=user_query
 )
 
+answer, sources = process_query(request.query, memory_block, role=request.role)
+print(f"[DEBUG] topic='{topic}' query_type='{query_type}'")  # ← add this
+
 def increment_route_counter(doc_category: str, db: Session):
     try:
         if doc_category in ("live", "sales_assist"):
@@ -1445,6 +1449,17 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     # 4. Log to DB
     _cat          = parsed_for_stats.get("doc_category", "internal")
     _used_internet = _cat in ("live", "sales_assist")
+
+    product_image = None
+    parsed_meta   = parse_query(request.query)
+    topic         = parsed_meta.get("topic", "")
+    query_type    = parsed_meta.get("query_type", "")
+    
+    if query_type == "retrieval" and topic:
+        try:
+            product_image = fetch_product_image(topic)
+        except Exception as e:
+            print(f"[Stream] Image fetch failed: {e}")
     
     message = ChatMessage(
         session_id    = session.session_id,
@@ -1470,6 +1485,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         "db_sources"  : sources["db_sources"],
         "web_sources" : sources["web_sources"],
         "followups"   : followups,
+        "product_image": product_image,
     }
 
 @app.post("/chat/stream")
@@ -1507,8 +1523,8 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
                 yield f"data: {json.dumps({'type': 'token', 'content': word + ' '})}\n\n"
                 await asyncio.sleep(0.02)
             yield f"data: {json.dumps({'type': 'token', 'content': '\n'})}\n\n"
-        yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups})}\n\n"
-
+        yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups, 'product_image': product_image})}\n\n"
+        
     return StreamingResponse(generate(), media_type="text/event-stream")
     
 @app.patch("/chat/{message_id}/rate")
