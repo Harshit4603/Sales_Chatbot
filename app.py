@@ -1488,7 +1488,6 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         "product_image": product_image,
     }
 
-@app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     session = None
     if request.session_id:
@@ -1504,6 +1503,19 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
 
     memory_block = build_memory_block(str(session.session_id), db)
     answer, sources = process_query(request.query, memory_block, role=request.role)
+
+    # ── Image fetch ───────────────────────────────────────────
+    product_image = None
+    parsed_meta   = parse_query(request.query)
+    topic         = parsed_meta.get("topic", "")
+    query_type    = parsed_meta.get("query_type", "")
+
+    if query_type == "retrieval" and topic:
+        try:
+            product_image = fetch_product_image(topic)
+        except Exception as e:
+            print(f"[Stream] Image fetch failed: {e}")
+    # ─────────────────────────────────────────────────────────
 
     message = ChatMessage(
         session_id=session.session_id,
@@ -1524,20 +1536,8 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
                 await asyncio.sleep(0.02)
             yield f"data: {json.dumps({'type': 'token', 'content': '\n'})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups, 'product_image': product_image})}\n\n"
-        
-    return StreamingResponse(generate(), media_type="text/event-stream")
-    
-@app.patch("/chat/{message_id}/rate")
-def rate_message(message_id: str, request: RatingRequest, db: Session = Depends(get_db)):
-    message = db.query(ChatMessage).filter(
-        ChatMessage.message_id == message_id
-    ).first()
-    if not message:
-        raise HTTPException(status_code=404, detail="Message not found")
-    message.rating = request.rating
-    db.commit()
-    return {"message_id": message_id, "rating": request.rating}
 
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.get("/sessions/{session_id}/history")
 def get_history(session_id: str, db: Session = Depends(get_db)):
