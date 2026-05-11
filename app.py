@@ -1309,9 +1309,6 @@ def process_query(
     original_query=user_query
 )
 
-answer, sources = process_query(request.query, memory_block, role=request.role)
-print(f"[DEBUG] topic='{topic}' query_type='{query_type}'")  # ← add this
-
 def increment_route_counter(doc_category: str, db: Session):
     try:
         if doc_category in ("live", "sales_assist"):
@@ -1487,7 +1484,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         "followups"   : followups,
         "product_image": product_image,
     }
-
+@app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     session = None
     if request.session_id:
@@ -1538,6 +1535,17 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
         yield f"data: {json.dumps({'type': 'done', 'session_id': str(session.session_id), 'message_id': str(message.message_id), 'db_sources': sources['db_sources'], 'web_sources': sources['web_sources'], 'followups': followups, 'product_image': product_image})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+@app.patch("/chat/{message_id}/rate")
+def rate_message(message_id: str, request: RatingRequest, db: Session = Depends(get_db)):
+    message = db.query(ChatMessage).filter(
+        ChatMessage.message_id == message_id
+    ).first()
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    message.rating = request.rating
+    db.commit()
+    return {"message_id": message_id, "rating": request.rating}
 
 @app.get("/sessions/{session_id}/history")
 def get_history(session_id: str, db: Session = Depends(get_db)):
