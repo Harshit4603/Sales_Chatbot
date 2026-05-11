@@ -123,7 +123,14 @@ def _is_product_image(url: str) -> bool:
     if not any(ext in url_lower for ext in (".jpg", ".jpeg", ".png", ".webp")):
         return False
 
+    # Reject tiny images (thumbnails, icons) via Shopify width param
+    import re as _re
+    width_match = _re.search(r'[?&]width=(\d+)', url)
+    if width_match and int(width_match.group(1)) < 400:
+        return False
+
     # Reject generic/non-product filenames
+    filename = url_lower.split("/")[-1].split("?")[0]
     skip_keywords = [
         "logo", "icon", "banner", "badge", "flag", "sprite",
         "placeholder", "blank", "favicon", "talktous", "talk-to-us",
@@ -134,21 +141,16 @@ def _is_product_image(url: str) -> bool:
         "chat", "support", "contact", "email", "phone",
         "loader", "spinner", "hero", "slide", "slider",
     ]
-    # Extract just the filename from URL
-    filename = url_lower.split("/")[-1].split("?")[0]
     if any(kw in filename for kw in skip_keywords):
         return False
 
-    # Prefer URLs that look like actual product images
+    # Accept only product-related URLs
     product_hints = [
         "mattress", "pillow", "sofa", "recliner", "chair",
         "bed", "smartgrid", "smart-grid", "product", "ortho",
         "ergo", "feel", "luxe", "original", "elite", "pro",
     ]
     has_product_hint = any(hint in url_lower for hint in product_hints)
-
-    # Also accept Shopify CDN files with numeric IDs (standard product image pattern)
-    # e.g. /files/1/0635/.../products/image.jpg
     is_shopify_product = "cdn.shopify.com" in url_lower and "/products/" in url_lower
 
     return has_product_hint or is_shopify_product
