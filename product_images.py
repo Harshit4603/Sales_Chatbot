@@ -111,28 +111,44 @@ def _normalise_url(src: str) -> str:
 
 
 def _is_product_image(url: str) -> bool:
-    """
-    Rejects icons, logos, banners, and non-image URLs.
-    Accepts only clean product image URLs from thesleepcompany.in CDN.
-    """
     if not url:
         return False
     url_lower = url.lower()
 
-    # Must be from the Sleep Company CDN
-    if "thesleepcompany.in" not in url_lower and "cdn.shopify" not in url_lower:
+    # Must be from Sleep Company CDN
+    if "thesleepcompany.in" not in url_lower and "cdn.shopify.com" not in url_lower:
         return False
 
     # Must be an image file
-    if not any(url_lower.endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".webp")):
-        # Allow CDN URLs without extensions (Shopify sometimes omits them)
-        if "cdn.shopify.com/s/files" not in url_lower:
-            return False
-
-    # Reject noise
-    skip_keywords = ["logo", "icon", "banner", "badge", "flag",
-                     "sprite", "placeholder", "blank", "favicon"]
-    if any(kw in url_lower for kw in skip_keywords):
+    if not any(ext in url_lower for ext in (".jpg", ".jpeg", ".png", ".webp")):
         return False
 
-    return True
+    # Reject generic/non-product filenames
+    skip_keywords = [
+        "logo", "icon", "banner", "badge", "flag", "sprite",
+        "placeholder", "blank", "favicon", "talktous", "talk-to-us",
+        "whatsapp", "wp", "footer", "header", "bg", "background",
+        "arrow", "star", "rating", "tick", "check", "close",
+        "social", "facebook", "instagram", "youtube", "twitter",
+        "app-store", "play-store", "qr", "map", "location",
+        "chat", "support", "contact", "email", "phone",
+        "loader", "spinner", "hero", "slide", "slider",
+    ]
+    # Extract just the filename from URL
+    filename = url_lower.split("/")[-1].split("?")[0]
+    if any(kw in filename for kw in skip_keywords):
+        return False
+
+    # Prefer URLs that look like actual product images
+    product_hints = [
+        "mattress", "pillow", "sofa", "recliner", "chair",
+        "bed", "smartgrid", "smart-grid", "product", "ortho",
+        "ergo", "feel", "luxe", "original", "elite", "pro",
+    ]
+    has_product_hint = any(hint in url_lower for hint in product_hints)
+
+    # Also accept Shopify CDN files with numeric IDs (standard product image pattern)
+    # e.g. /files/1/0635/.../products/image.jpg
+    is_shopify_product = "cdn.shopify.com" in url_lower and "/products/" in url_lower
+
+    return has_product_hint or is_shopify_product
