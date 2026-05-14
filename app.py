@@ -17,6 +17,7 @@ from groq import Groq
 from pinecone import Pinecone
 import google.genai as genai
 from google.genai import types
+from tavily import TavilyClient
 
 from database import get_db
 from models import ChatSession, ChatMessage, Employee, get_ist
@@ -52,6 +53,7 @@ HF_API_KEY  = os.getenv("HF_API_KEY")
 HF_API_URL  = "https://router.huggingface.co/hf-inference/models/BAAI/bge-base-en-v1.5"
 HF_HEADERS  = {"Authorization": f"Bearer {HF_API_KEY}", "Content-Type": "application/json"}
 
+tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX   = "sales-chatbot"
 GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
@@ -284,7 +286,7 @@ User query: {user_query}"""
 
         gibberish      = bool(parsed.get("gibberish", False))
         conv_type      = parsed.get("conversation_type", "work_query")
-        needs_live     = bool(parsed.get("needs_live_data", False))
+        needs_live     = bool(parsed.get("needs_live_data", True))
         needs_internal = bool(parsed.get("needs_internal_docs", True))
         topic          = parsed.get("topic", "")
 
@@ -311,7 +313,7 @@ User query: {user_query}"""
             else:
                 # Both false — LLM unsure, run everything
                 doc_category = "internal"
-                needs_live = False
+                needs_live = True
                 needs_internal = True
 
         print(f"[Parser] gibberish={gibberish} | conv={conv_type} | "
@@ -322,7 +324,7 @@ User query: {user_query}"""
             "query_type":     query_type,
             "doc_category":   doc_category,
             "topic":          topic,
-            "needs_live":     False,
+            "needs_live":     True,
             "needs_internal": True,
             "query_parts":    parsed.get("query_parts", []),
             "is_multi_part":  bool(parsed.get("is_multi_part", False)),
@@ -752,93 +754,118 @@ ANSWER STRUCTURE:
   answer yes/no/partially, then explain why."""
 
 
-def search_with_gemini(user_query: str, db_context: str = "") -> dict:
-    """
-    Calls Gemini with Google Search grounding.
-    db_context is injected as primary source so Gemini can synthesize both.
-    Returns {"answer": str, "web_sources": list[dict]}
-    """
-    if db_context.strip():
-        user_message = (
-            f"Internal company context (PRIMARY - use this first):\n"
-            f"---\n{db_context[:4000]}\n---\n\n"
-            f"User question: {user_query}\n\n"
-            f"Answer using internal context first. If colors, variants, live pricing, "
-            f"or competitor details are missing, use Google Search to fill gaps from "
-            f"https://thesleepcompany.in."
+# def search_with_gemini(user_query: str, db_context: str = "") -> dict:
+#     """
+#     Calls Gemini with Google Search grounding.
+#     db_context is injected as primary source so Gemini can synthesize both.
+#     Returns {"answer": str, "web_sources": list[dict]}
+#     """
+#     if db_context.strip():
+#         user_message = (
+#             f"Internal company context (PRIMARY - use this first):\n"
+#             f"---\n{db_context[:4000]}\n---\n\n"
+#             f"User question: {user_query}\n\n"
+#             f"Answer using internal context first. If colors, variants, live pricing, "
+#             f"or competitor details are missing, use Google Search to fill gaps from "
+#             f"https://thesleepcompany.in."
+#         )
+#     else:
+#         user_message = (
+#             f"User question: {user_query}\n\n"
+#             f"Use Google Search to provide accurate, up-to-date information "
+#             f"from https://thesleepcompany.in."
+#         )
+
+#     max_retries = 5
+#     for attempt in range(max_retries):
+#         try:
+#             grounding_tool = types.Tool(google_search=types.GoogleSearch())
+#             config = types.GenerateContentConfig(
+#                 tools=[grounding_tool],
+#                 temperature=0.1,
+#                 max_output_tokens=2500,
+#                 system_instruction=GEMINI_SYSTEM_PROMPT,
+#             )
+#             response = genai_client.models.generate_content(
+#                 model="gemini-2.5-flash",
+#                 contents=user_message,
+#                 config=config,
+#             )
+
+#             answer      = response.text.strip() if response.text else ""
+#             web_sources = []
+
+#             try:
+#                 if response.candidates:
+#                     candidate = response.candidates[0]
+#                     if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
+#                         for chunk in getattr(candidate.grounding_metadata,
+#                                              "grounding_chunks", []) or []:
+#                             if hasattr(chunk, "web") and chunk.web:
+#                                 web_sources.append({
+#                                     "title": getattr(chunk.web, "title", "The Sleep Company"),
+#                                     "url":   getattr(chunk.web, "uri",   ""),
+#                                 })
+#             except Exception:
+#                 pass
+
+#             # Fallback URL extraction
+#             if not web_sources:
+#                 import re
+#                 for url in re.findall(r"https?://[^\s\)\"\']+", answer)[:6]:
+#                     if "thesleepcompany.in" in url.lower():
+#                         web_sources.append({"title": "The Sleep Company", "url": url})
+
+#             print(f"[Gemini] ✅ attempt={attempt+1} | sources={len(web_sources)}")
+#             return {"answer": answer, "web_sources": web_sources}
+
+#         except Exception as e:
+#             err = str(e).lower()
+#             if any(x in err for x in ["503", "high demand", "unavailable", "overloaded"]):
+#                 wait = (2 ** attempt) + random.uniform(0.5, 2.0)
+#                 print(f"[Gemini] 503 — retrying in {wait:.1f}s (attempt {attempt+1})")
+#                 time.sleep(wait)
+#             else:
+#                 print(f"[Gemini] Non-retryable error: {e}")
+#                 break
+
+#     # Groq fallback when all Gemini attempts fail
+#     print("[Gemini] All retries failed → Groq fallback")
+#     fallback = query_groq(
+#         f"Answer as best you can, and if unsure, direct the user to "
+#         f"https://thesleepcompany.in\n\nQuestion: {user_query}",
+#         model="llama-3.3-70b-versatile",
+#         temperature=0.2,
+#     )
+#     return {
+#         "answer": fallback or "Please visit https://thesleepcompany.in for the latest info.",
+#         "web_sources": [],
+#     }
+
+def search_with_tavily(user_query: str, db_context: str = "") -> dict:
+    try:
+        result = tavily_client.search(
+            query=user_query,
+            search_depth="advanced",
+            include_domains=["thesleepcompany.in"],
+            max_results=5,
         )
-    else:
-        user_message = (
-            f"User question: {user_query}\n\n"
-            f"Use Google Search to provide accurate, up-to-date information "
-            f"from https://thesleepcompany.in."
+        snippets = "\n\n".join(
+            f"[{r['title']}]\n{r['content']}" for r in result.get("results", [])
         )
+        web_sources = [{"title": r["title"], "url": r["url"]} for r in result.get("results", [])]
 
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            grounding_tool = types.Tool(google_search=types.GoogleSearch())
-            config = types.GenerateContentConfig(
-                tools=[grounding_tool],
-                temperature=0.1,
-                max_output_tokens=2500,
-                system_instruction=GEMINI_SYSTEM_PROMPT,
-            )
-            response = genai_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=user_message,
-                config=config,
-            )
-
-            answer      = response.text.strip() if response.text else ""
-            web_sources = []
-
-            try:
-                if response.candidates:
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, "grounding_metadata") and candidate.grounding_metadata:
-                        for chunk in getattr(candidate.grounding_metadata,
-                                             "grounding_chunks", []) or []:
-                            if hasattr(chunk, "web") and chunk.web:
-                                web_sources.append({
-                                    "title": getattr(chunk.web, "title", "The Sleep Company"),
-                                    "url":   getattr(chunk.web, "uri",   ""),
-                                })
-            except Exception:
-                pass
-
-            # Fallback URL extraction
-            if not web_sources:
-                import re
-                for url in re.findall(r"https?://[^\s\)\"\']+", answer)[:6]:
-                    if "thesleepcompany.in" in url.lower():
-                        web_sources.append({"title": "The Sleep Company", "url": url})
-
-            print(f"[Gemini] ✅ attempt={attempt+1} | sources={len(web_sources)}")
-            return {"answer": answer, "web_sources": web_sources}
-
-        except Exception as e:
-            err = str(e).lower()
-            if any(x in err for x in ["503", "high demand", "unavailable", "overloaded"]):
-                wait = (2 ** attempt) + random.uniform(0.5, 2.0)
-                print(f"[Gemini] 503 — retrying in {wait:.1f}s (attempt {attempt+1})")
-                time.sleep(wait)
-            else:
-                print(f"[Gemini] Non-retryable error: {e}")
-                break
-
-    # Groq fallback when all Gemini attempts fail
-    print("[Gemini] All retries failed → Groq fallback")
-    fallback = query_groq(
-        f"Answer as best you can, and if unsure, direct the user to "
-        f"https://thesleepcompany.in\n\nQuestion: {user_query}",
-        model="llama-3.3-70b-versatile",
-        temperature=0.2,
-    )
-    return {
-        "answer": fallback or "Please visit https://thesleepcompany.in for the latest info.",
-        "web_sources": [],
-    }
+        # Synthesize with Groq (no Gemini needed)
+        synthesis_prompt = (
+            f"Internal context:\n{db_context[:3000]}\n\n"
+            f"Web results:\n{snippets}\n\n"
+            f"Answer this for a Sleep Company sales rep: {user_query}"
+        )
+        answer = query_groq(synthesis_prompt, temperature=0.2)
+        return {"answer": answer, "web_sources": web_sources}
+    except Exception as e:
+        print(f"[Tavily] Failed: {e}")
+        return {"answer": "", "web_sources": []}
 
 
 # =============================================================================
@@ -855,13 +882,16 @@ async def fetch_db_async(user_query: str, doc_category: str, topic: str,
     )
 
 
-async def fetch_gemini_async(user_query: str, db_context: str) -> dict:
-    """Wraps synchronous Gemini call for asyncio.gather."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, search_with_gemini, user_query, db_context
-    )
+# async def fetch_gemini_async(user_query: str, db_context: str) -> dict:
+#     """Wraps synchronous Gemini call for asyncio.gather."""
+#     loop = asyncio.get_event_loop()
+#     return await loop.run_in_executor(
+#         None, search_with_gemini, user_query, db_context
+#     )
 
+async def fetch_tavily_async(user_query: str, db_context: str) -> dict:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, search_with_tavily, user_query, db_context)
 
 # =============================================================================
 # STEP 11 — SMART MERGER
@@ -1074,7 +1104,7 @@ def smart_merge(
     if gemini_answer:
         final = gemini_answer
     else:
-        retry = search_with_gemini(user_query, db_context="")
+        retry = search_with_tavily(user_query, db_context="")
         final = retry.get("answer") or (
             "I couldn't retrieve that right now. "
             "Please visit https://thesleepcompany.in"
@@ -1120,8 +1150,18 @@ async def parallel_retrieve_and_answer_async(
 
     # ── Phase 1: DB retrieval (only if needed) ────────────────────────────────
     if needs_internal:
-        db_chunks  = await fetch_db_async(retrieval_query, doc_category, topic, role)
-        db_context = build_context(db_chunks) if db_chunks else ""
+        db_chunks = await fetch_db_async(retrieval_query, doc_category, topic, role)
+        strong_count = count_strong(db_chunks)
+        db_context = build_context(db_chunks)
+        
+        # Fallback trigger
+        if strong_count < DB_STRONG_THRESHOLD:
+            print(f"[Fallback] Only {strong_count} strong chunks — triggering Tavily")
+            parsed["needs_live"] = True
+            parsed["doc_category"] = "sales_assist"
+                # ← ADD THESE TWO LINES HERE
+        doc_category = parsed["doc_category"]
+        needs_live   = parsed["needs_live"]
     else:
         db_chunks  = []
         db_context = ""
@@ -1157,7 +1197,7 @@ async def parallel_retrieve_and_answer_async(
 
     # Gemini — only if live needed
     if needs_live:
-        gemini_task = fetch_gemini_async(user_query, db_context)
+        gemini_task = fetch_tavily_async(user_query, db_context)
     else:
         async def _empty_dict(): return {"answer": "", "web_sources": []}
         gemini_task = _empty_dict()
