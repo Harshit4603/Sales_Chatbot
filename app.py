@@ -1012,184 +1012,66 @@ def format_final_answer(raw_answer: str, user_query: str,
                         original_language: str = "english",
                         doc_category: str = "internal") -> str:
 
-    # Strip echoed question if Groq repeated it
     if raw_answer.lower().startswith(user_query[:30].lower()):
         raw_answer = raw_answer[len(user_query):].strip()
 
+    # Safety net — never format an empty answer
+    if not raw_answer or not raw_answer.strip():
+        return "I wasn't able to generate a response. Please try again."
+
     if original_language == "english":
-        prompt = f"""You are a response formatter for The Sleep Company's internal sales assistant.
-
-User asked: "{user_query}"
-
-Raw answer:
----
-{raw_answer}
----
-
-REORDERING LOGIC (apply this first, before any formatting):
-- Read the full raw answer and identify the MOST SPECIFIC, DIRECT answer to the query
-- That specific answer (exact spec, price, step, name, feature) goes FIRST as the opening line
-- Then follow with supporting detail that explains WHY or HOW
-- Then end with the broadest context (category, use-case, positioning)
-- Think: Answer → Evidence → Context (never Context → Evidence → Answer)
-
-Example of WRONG order (broad to specific):
-"The Sleep Company offers a range of mattresses. SmartGRID is a key technology. The Ortho X uses SmartGRID and costs ₹25,000."
-
-Example of RIGHT order (specific to broad):
-"The **Ortho X** is priced at ₹25,000 and runs on **SmartGRID** technology — here's why that matters for your customer."
-
-FORMATTING RULES:
-- Opening line: one sharp, complete sentence stating the direct answer — no bullet, no bold header
-- Following bullets: specific facts first (numbers, names, dimensions, steps), then benefits, then positioning
-- Each bullet = one complete insight, 15-25 words, subject + verb + object always present
-- **Bold** only product names and standout differentiators — never bold every line
-- Fix ALL grammar — missing articles, fragments, run-ons, tense errors, misplaced prepositions
-- Warm, collegial tone — senior colleague giving inside knowledge, not a manual being recited
-- Never add new information — only restructure, fix grammar, and format
-- Use markdown table when comparing specs or products side by side
-- End with "Want me to go deeper on any part of this?" only if answer exceeds 8 bullets
-
-OUTPUT: Only the reordered, polished answer. No preamble, no explanation."""
+        prompt = f"""..."""  # your existing English prompt
 
     else:
-        language_guide = {
-            "hinglish":  "Hindi+English Roman: 'SmartGRID ek patented tech hai, extra comfort milta hai'",
-            "hindi":     "Hindi+English Roman: 'SmartGRID ek patented tech hai, extra comfort milta hai'",
-            "marathi":   "Marathi+English Roman: 'SmartGRID ek patented tech aahe, extra comfort milto'",
-            "tamil":     "Tamil+English Roman: 'SmartGRID oru patented tech, extra comfort kudukum'",
-            "telugu":    "Telugu+English Roman: 'SmartGRID oka patented tech, extra comfort istundi'",
-            "kannada":   "Kannada+English Roman: 'SmartGRID ondu patented tech, extra comfort kottide'",
-            "malayalam": "Malayalam+English Roman: 'SmartGRID oru patented tech aanu, extra comfort kittum'",
-            "gujarati":  "Gujarati+English Roman: 'SmartGRID ek patented tech chhe, extra comfort male chhe'",
-            "bengali":   "Bengali+English Roman: 'SmartGRID ekta patented tech, extra comfort pawa jay'",
-            "punjabi":   "Punjabi+English Roman: 'SmartGRID ik patented tech hai, extra comfort mildi hai'",
-            "odia":      "Odia+English Roman: 'SmartGRID gote patented tech, extra comfort mile'",
-            "assamese":  "Assamese+English Roman: 'SmartGRID এক patented tech, extra comfort powa jay'",
-            "bhojpuri":  "Bhojpuri+English Roman: 'SmartGRID ek patented tech hau, extra comfort milela'",
-        }.get(original_language, "Hinglish Roman script by default")
+        language_guide = { ... }.get(original_language, "Hinglish Roman script by default")
+        prompt = f"""..."""  # your existing non-English prompt
 
-        prompt = f"""You are rewriting a response for The Sleep Company's internal sales assistant.
-The user wrote in {original_language}. Match their language and tone exactly.
-
-User asked: "{user_query}"
-Language style: {language_guide}
-
-Raw answer:
----
-{raw_answer}
----
-
-REORDERING LOGIC (apply this first, before translating):
-- Find the MOST SPECIFIC answer in the raw text — exact price, spec, step, feature name
-- That goes FIRST as the opening line in {original_language}
-- Then supporting detail (why/how) in the middle
-- Broadest context (category, positioning) comes LAST
-- Order: Direct answer → Evidence → Context (never the reverse)
-
-Example structure in Hinglish:
-Opening: "**Ortho X** ki price ₹25,000 hai aur isme **SmartGRID** technology hai."
-Middle bullets: specific features, dimensions, what the customer feels
-Last bullet: broad positioning — "Yeh mattress back pain ke liye best choice hai overall."
-
-FORMATTING RULES:
-- Opening line: one sharp sentence in {original_language} — the direct answer, no bullet
-- Bullets after: specific → supporting → broad (bottom-up order strictly)
-- Product names, prices, dimensions, technical terms → always in English
-- Rewrite every bullet in {original_language} mixed with English (Roman script ONLY — never native script)
-- Fix grammar in both languages — fluent, natural phrasing throughout
-- **Bold** only product names — never bold every line
-- 10-20 words per bullet, 12 bullets max
-- Match the user's tone exactly — casual query = casual collegial reply
-- Never add new information — only reorder, translate, and fix grammar
-- End with a natural closing line in {original_language} that moves toward the sale
-
-OUTPUT: Only the rewritten answer. No thinking, no explanation, no preamble."""
-        
-def smart_merge(
-    user_query:        str,
-    doc_category:      str,
-    db_chunks:         list[dict],
-    db_context:        str,
-    groq_answer:       str,
-    gemini_result:     dict,
-    original_language: str = "english",
-    original_query:    str = "",
-) -> tuple[str, dict]:
-
-
-    gemini_answer = gemini_result.get("answer", "")
-    web_sources   = gemini_result.get("web_sources", [])
-    db_sources    = [c.get("text", "") for c in db_chunks]
-
-    PRICE_DISCLAIMER = (
-        "\n\n⚠️ *Prices are subject to change. Always confirm on "
-        "[thesleepcompany.in](https://thesleepcompany.in) "
-        "or with your manager before quoting to a customer.*"
-    )
-
-    # ── LIVE ─────────────────────────────────────────────────────────────────
-    if doc_category == "live":
-        print("[Merge] Strategy: LIVE → Gemini only")
-        if gemini_answer:
-            final = gemini_answer + PRICE_DISCLAIMER
-        else:
-            final = (
-                "Please check the latest pricing and availability directly on "
-                "https://thesleepcompany.in or confirm with your manager."
+    # ── THIS BLOCK MUST BE INSIDE THE FUNCTION ────────────────────────────
+    for attempt in range(5):
+        try:
+            resp = groq_client.chat.completions.create(
+                model="qwen/qwen3-32b",
+                messages=[
+                    {"role": "system", "content": "You are a translator. Output ONLY the final rewritten answer. Do not think out loud. Do not use <think> tags. No preamble, no explanation."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=2000,
             )
-        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
+            break
+        except Exception as e:
+            if attempt < 4:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"[Formatter] Failed ({e}) — returning raw answer")
+                return raw_answer or "I wasn't able to generate a response. Please try again."
 
-        return final, {"db_sources": [], "web_sources": web_sources}
+    try:
+        raw_result = resp.choices[0].message.content.strip() if resp.choices else raw_answer
 
-    # ── INTERNAL ─────────────────────────────────────────────────────────────
-    if doc_category == "internal":
-        print("[Merge] Strategy: INTERNAL → Groq primary")
-        print(f"[Merge] Groq answer preview: {groq_answer[:200] if groq_answer else 'EMPTY'}")
-        REDIRECT_PHRASES = ("contact", "refer to", "section of", "can be found", "handbook", "as per", "please visit", "details in")
-        matched = [p for p in REDIRECT_PHRASES if p in groq_answer.lower()] if groq_answer else []
-        print(f"[Merge] Matched redirect phrases: {matched}")
-        final = groq_answer or "I don't have enough details on this in our internal docs right now."
-        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
+        result = re.sub(r'<think>.*?</think>', '', raw_result, flags=re.DOTALL).strip()
+        if '<think>' in result:
+            result = result[result.rfind('<think>'):].replace('<think>', '').strip()
+        if not result and '</think>' in raw_result:
+            result = raw_result[raw_result.rfind('</think>') + 8:].strip()
 
-        return final, {"db_sources": db_sources, "web_sources": []}
+        result = result or raw_answer
 
-    # ── SALES ASSIST ──────────────────────────────────────────────────────────
-    if doc_category == "sales_assist":
-        print("[Merge] Strategy: SALES ASSIST → Gemini primary, DB supplements")
-        if gemini_answer and groq_answer:
-            final = (
-                f"{gemini_answer}\n\n"
-                f"**From internal docs:**\n{groq_answer}"
-            )
-        elif gemini_answer:
-            final = gemini_answer
-        elif groq_answer:
-            final = groq_answer
-        else:
-            final = (
-                "I couldn't retrieve enough information right now. "
-                "Please visit https://thesleepcompany.in or contact your manager."
-            )
-        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
+        if original_language not in ("english",):
+            hindi_markers = ["hai", "ka", "ki", "ke", "kya", "aur", "nahi", "se", "mein", "ho",
+                             "aahe", "milto", "kudukum", "istundi", "kottide", "kittum",
+                             "chhe", "jay", "mildi", "mile", "powa", "hau"]
+            has_target_lang = any(w in result.lower() for w in hindi_markers)
+            if not has_target_lang:
+                print(f"[Formatter] Language check failed — returning raw answer")
+                return raw_answer
 
-        return final, {"db_sources": db_sources, "web_sources": web_sources}
+        # Final safety net
+        return result or raw_answer or "I wasn't able to generate a response. Please try again."
 
-    # ── GENERAL FALLBACK ─────────────────────────────────────────────────────
-    print("[Merge] Strategy: FALLBACK → Gemini primary")
-    if gemini_answer:
-        final = gemini_answer
-    else:
-        retry = search_with_tavily(user_query, db_context="")
-        final = retry.get("answer") or (
-            "I couldn't retrieve that right now. "
-            "Please visit https://thesleepcompany.in"
-        )
-        web_sources = retry.get("web_sources", web_sources)
-
-    final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
-    return final, {"db_sources": db_sources, "web_sources": web_sources}
-
+    except Exception as e:
+        print(f"[Formatter] Result parsing failed ({e}) — returning raw answer")
+        return raw_answer or "I wasn't able to generate a response. Please try again."
 
 # =============================================================================
 # STEP 12 — PARALLEL RETRIEVE AND ANSWER
@@ -1570,8 +1452,10 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     increment_route_counter(parsed_for_stats.get("doc_category", "internal"), db)
 
     # 4. Log to DB
-    _cat          = parsed_for_stats.get("doc_category", "internal")
+    _cat           = parsed_for_stats.get("doc_category", "internal")
     _used_internet = _cat in ("live", "sales_assist")
+    topic          = parsed_for_stats.get("topic", "")
+    query_type     = parsed_for_stats.get("query_type", "")
 
     product_image = None
     parsed_meta   = parse_query(request.query)
