@@ -42,7 +42,7 @@ SOURCES_ACCESSED    = 10     # top_k chunks pulled from Pinecone per query
 MEMORY_TURNS        = 4      # how many past Q&A pairs to include in the LLM prompt
 DB_STRONG_THRESHOLD = 4      # min strong DB chunks to consider DB context "rich"
 SCORE_THRESHOLD     = 0.25   # min Pinecone score to count a chunk as "strong"
-MAX_CONTEXT_CHARS   = 4500   # cap on DB context fed to LLM
+MAX_CONTEXT_CHARS   = 8000   # cap on DB context fed to LLM
 
 # =============================================================================
 # CLIENTS
@@ -670,6 +670,15 @@ HOW TO WRITE:
 - Every single point must be a bullet, no exceptions
 - Use a markdown table when comparing multiple products, features, specs, or options side by side
 - Table format: | Column | Column | with a separator row |---|---| always
+- Open with a confident 1-line summary of the answer — state the key fact immediately
+- Use bullets for all supporting detail — each bullet = one complete insight
+- 15-25 words per bullet; never truncate mid-thought
+- Lead every product answer with: what it is → why it matters → what the customer gains
+- For specs/comparisons: always use markdown tables
+- If docs contain a number, dimension, price range, or material — include it verbatim
+- Never say "refer to document" — extract and state the actual content
+- End long answers with "Want me to go deeper on any part?" only if >10 bullets
+- Never bold every line — only product names and standout differentiators
 
 MULTI-PART QUERIES:
 - Acknowledge the full query in one natural line
@@ -954,7 +963,7 @@ OUTPUT: Only the rewritten answer. No thinking, no explanation, no preamble."""
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=1200,
+                max_tokens=2000,
             )
             break
         except Exception as e:
@@ -1133,11 +1142,13 @@ async def parallel_retrieve_and_answer_async(
             f"{memory_section}"
             f"{'This query has multiple parts — answer each under its own header.' if is_multi else ''}\n"
             f"Sub-questions to address:\n{parts_block}\n\n"
+            f"CRITICAL: Extract actual specs, numbers, and steps from the context below — never redirect.\n"
+            f"Cover ALL sub-questions fully. Do not truncate any answer.\n"  # ← add this
             f"For PRODUCT parts use FABED structure.\n"
             f"For PROCESS parts use precise steps from documents.\n"
-            f"Do NOT say 'refer to document' — extract actual content.\n"
             f"--- CONTEXT ---\n{db_context}\n---------------\n"
             f"Full query: {user_query}\nAnswer:"
+        )
         )
         loop      = asyncio.get_event_loop()
         groq_task = loop.run_in_executor(None, query_groq, groq_prompt)
