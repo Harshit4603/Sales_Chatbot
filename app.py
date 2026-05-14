@@ -1149,7 +1149,6 @@ async def parallel_retrieve_and_answer_async(
             f"--- CONTEXT ---\n{db_context}\n---------------\n"
             f"Full query: {user_query}\nAnswer:"
         )
-        )
         loop      = asyncio.get_event_loop()
         groq_task = loop.run_in_executor(None, query_groq, groq_prompt)
     else:
