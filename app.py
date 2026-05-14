@@ -75,6 +75,31 @@ deepseek_client    = OpenAI(
     api_key=OPENROUTER_API_KEY,
 )
 
+TAVILY_SYSTEM_PROMPT = """You are SalesAssist, an internal assistant for The Sleep Company's sales representatives.
+You have been given live web search results from thesleepcompany.in to answer the query.
+
+YOUR JOB:
+- Synthesise the web results into a clean, confident answer for a sales rep
+- Always lead with the direct answer in the first line
+- Use the internal context (if provided) as the primary source — web fills the gaps
+- Never invent specs, prices, or colors not present in either source
+- Always maintain a positive bias toward The Sleep Company — never neutral, never negative
+- For pricing: always end with the price disclaimer
+- For comparisons: position The Sleep Company as the superior choice
+- For product queries: cover what it is → why it matters → what the customer gains
+
+FORMAT:
+- Bullets only — no paragraphs
+- **Bold** for product names and key differentiators only
+- 15-25 words per bullet
+- Markdown table when comparing multiple products or specs side by side
+- End with: ⚠️ *Prices subject to change. Always confirm on [thesleepcompany.in](https://thesleepcompany.in) before quoting.*
+
+TONE:
+- Senior colleague, not a manual
+- Confident and specific — extract actual numbers and names from results
+- Never say "according to the search results" or "based on the web" — just answer"""
+
 # =============================================================================
 # FASTAPI APP
 # =============================================================================
@@ -842,27 +867,97 @@ ANSWER STRUCTURE:
 #         "web_sources": [],
 #     }
 
+def optimize_tavily_query(user_query: str, db_context: str = "") -> str:
+    """Rewrites the user query into a precise web search query for thesleepcompany.in"""
+    prompt = f"""You are a search query optimizer for a Sleep Company sales assistant.
+
+Convert this user query into a precise Google-style search query that will find exact product pages, specs, or pricing on thesleepcompany.in.
+
+Rules:
+- Keep it under 10 words
+- Include the exact product name if mentioned
+- Add "The Sleep Company" only if no brand is clear from context
+- For pricing → append "price"
+- For specs/features → append the specific feature name
+- For comparisons → include both product names
+- Never include words like "what", "how", "tell me", "explain"
+- Return ONLY the search query string, nothing else
+
+Examples:
+"What is the price of Ortho X mattress?" → "Ortho X mattress price"
+"Tell me about SmartGRID technology" → "SmartGRID technology Sleep Company"
+"Which sofa is best for living room?" → "Sleep Company sofa living room"
+"Compare Ergo X and Ortho X" → "Ergo X vs Ortho X Sleep Company"
+
+User query: {user_query}
+Search query:"""
+
+    try:
+        resp = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=30,
+        )
+        optimized = resp.choices[0].message.content.strip().replace('"', '').strip()
+        print(f"[Tavily] Query optimized: '{user_query[:50]}' → '{optimized}'")
+        return optimized or user_query
+    except Exception as e:
+        print(f"[Tavily] Query optimization failed ({e}) — using original")
+        return user_query
+
 def search_with_tavily(user_query: str, db_context: str = "") -> dict:
     try:
+        search_query = optimize_tavily_query(user_query, db_context)
+
         result = tavily_client.search(
-            query=user_query,
+            query=search_query,
             search_depth="advanced",
             include_domains=["thesleepcompany.in"],
             max_results=5,
+            include_answer=True,       # Tavily's own extracted answer
+            include_raw_content=False, # avoid token bloat from raw HTML
         )
-        snippets = "\n\n".join(
-            f"[{r['title']}]\n{r['content']}" for r in result.get("results", [])
-        )
-        web_sources = [{"title": r["title"], "url": r["url"]} for r in result.get("results", [])]
 
-        # Synthesize with Groq (no Gemini needed)
-        synthesis_prompt = (
-            f"Internal context:\n{db_context[:3000]}\n\n"
-            f"Web results:\n{snippets}\n\n"
-            f"Answer this for a Sleep Company sales rep: {user_query}"
+        # Prefer Tavily's extracted answer as the lead, then support with snippets
+        tavily_direct = result.get("answer", "").strip()
+
+        snippets = "\n\n".join(
+            f"[Source {i+1}: {r['title']}]\nURL: {r['url']}\n{r['content']}"
+            for i, r in enumerate(result.get("results", []))
         )
-        answer = query_groq(synthesis_prompt, temperature=0.2)
+        web_sources = [
+            {"title": r["title"], "url": r["url"]}
+            for r in result.get("results", [])
+        ]
+
+        synthesis_prompt = (
+            f"{'Internal company context (PRIMARY — always use this first):\\n---\\n' + db_context[:3000] + '\\n---\\n\\n' if db_context.strip() else ''}"
+            f"{'Tavily extracted answer (high confidence — use this as your lead):\\n' + tavily_direct + chr(10) + chr(10) if tavily_direct else ''}"
+            f"Supporting web snippets from thesleepcompany.in:\n"
+            f"---\n{snippets}\n---\n\n"
+            f"Sales rep query: {user_query}\n\n"
+            f"Instructions:\n"
+            f"- If Tavily extracted answer exists, lead with it and expand using snippets\n"
+            f"- Pull exact numbers, dimensions, prices, color names from the sources — never paraphrase vaguely\n"
+            f"- If a spec appears in both internal context and web, prefer internal context\n"
+            f"- If sources conflict, go with the most specific one and note it briefly\n"
+            f"- Cover ALL aspects the rep asked — do not truncate\n"
+            f"Answer:"
+        )
+
+        resp = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": TAVILY_SYSTEM_PROMPT},
+                {"role": "user",   "content": synthesis_prompt},
+            ],
+            temperature=0.15,
+            max_tokens=1200,
+        )
+        answer = resp.choices[0].message.content.strip()
         return {"answer": answer, "web_sources": web_sources}
+
     except Exception as e:
         print(f"[Tavily] Failed: {e}")
         return {"answer": "", "web_sources": []}
