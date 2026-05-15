@@ -1663,11 +1663,11 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
     # 5. Product image (single fetch, guarded)
     product_image = None
-    if query_type == "retrieval" and topic:
-        try:
-            product_image = fetch_product_image_from_answer(answer)
-        except Exception as e:
-            print(f"[Chat] Image fetch failed: {e}")
+    # if query_type == "retrieval" and topic:
+    #     try:
+    #         product_image = fetch_product_image_from_answer(answer)
+    #     except Exception as e:
+    #         print(f"[Chat] Image fetch failed: {e}")
 
     # 6. Persist message
     message = ChatMessage(
@@ -1720,11 +1720,11 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     topic         = parsed_meta.get("topic", "")
     query_type    = parsed_meta.get("query_type", "")
 
-    if query_type == "retrieval" and topic:
-        try:
-            product_image = fetch_product_image_from_answer(answer)
-        except Exception as e:
-            print(f"[Stream] Image fetch failed: {e}")
+    # if query_type == "retrieval" and topic:
+    #     try:
+    #         product_image = fetch_product_image_from_answer(answer)
+    #     except Exception as e:
+    #         print(f"[Stream] Image fetch failed: {e}")
     # ─────────────────────────────────────────────────────────
 
     message = ChatMessage(
