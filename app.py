@@ -505,8 +505,22 @@ def generate_hypothetical_answer(user_query: str, doc_category: str) -> str:
     """Generates a hypothetical answer to improve Pinecone embedding match."""
     prompt = f"""Generate a short hypothetical answer (3-5 sentences) that would 
 appear in a Sleep Company internal document for this query.
-Write as if you are the document, not answering the user.
-Use formal, document-like language with specific details.
+
+RULES:
+- Write as if you are the document, not answering the user
+- Use formal, document-like language with specific product/process details
+- ONLY include content types that exist in real Sleep Company documents:
+  ✅ Product specs (dimensions, materials, technology, layers, firmness)
+  ✅ Product features and benefits (SmartGRID, foam type, cover fabric)
+  ✅ Pricing ranges and warranty terms
+  ✅ Care instructions and usage guidelines
+  ✅ SOPs, return/replacement steps, escalation paths
+  ✅ HR policies (leave, attendance, onboarding, training)
+- NEVER mention or imply:
+  ❌ Stock levels, inventory counts, or availability
+  ❌ Real-time data, live databases, or order tracking
+  ❌ Warehouse or supply chain details
+  ❌ Customer purchase history or CRM data
 
 Query: {user_query}
 Document type: {doc_category}
