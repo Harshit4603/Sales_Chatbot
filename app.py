@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import re
 from openai import OpenAI
 
-from product_images import fetch_product_image
+from product_images import fetch_product_image_from_answer
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -1619,7 +1619,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     product_image = None
     if query_type == "retrieval" and topic:
         try:
-            product_image = fetch_product_image(topic)
+            product_image = fetch_product_image_from_answer(answer)
         except Exception as e:
             print(f"[Chat] Image fetch failed: {e}")
     parsed_meta   = parse_query(request.query)
@@ -1628,7 +1628,7 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     
     if query_type == "retrieval" and topic:
         try:
-            product_image = fetch_product_image(topic)
+            product_image = fetch_product_image_from_answer(answer)
         except Exception as e:
             print(f"[Stream] Image fetch failed: {e}")
     
@@ -1683,7 +1683,7 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
 
     if query_type == "retrieval" and topic:
         try:
-            product_image = fetch_product_image(topic)
+            product_image = fetch_product_image_from_answer(answer)
         except Exception as e:
             print(f"[Stream] Image fetch failed: {e}")
     # ─────────────────────────────────────────────────────────
