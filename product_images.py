@@ -105,29 +105,45 @@ def fetch_product_image_from_answer(answer: str) -> str | None:
 # =============================================================================
 
 def _search_page_image(topic: str) -> str | None:
-    """
-    Hits the site search, finds the first /products/ link,
-    fetches that product page, and returns its og:image.
-    Falls back to scraping images directly from search results.
-    """
     try:
         search_url = f"{TSC_BASE}/search?q={quote_plus(topic)}&type=product"
         resp = requests.get(search_url, headers=HEADERS, timeout=6)
         if resp.status_code != 200:
-            print(f"[ImageFetch] Search page returned {resp.status_code}")
             return None
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Step 1: Find first product link from search results
+        # Step 1: Find product link from search RESULTS only
+        # Look inside result containers, not nav/header
         product_link = None
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if "/products/" in href:
+        
+        # Try common search result container selectors first
+        result_containers = (
+            soup.select(".product-item a[href*='/products/']") or
+            soup.select(".search-result a[href*='/products/']") or
+            soup.select(".grid__item a[href*='/products/']") or
+            soup.select("li a[href*='/products/']") or
+            soup.select("article a[href*='/products/']")
+        )
+        
+        if result_containers:
+            href = result_containers[0].get("href", "")
+            product_link = href if href.startswith("http") else TSC_BASE + href
+        else:
+            # Fallback: find ALL /products/ links, skip nav duplicates
+            seen = {}
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if "/products/" in href:
+                    clean = href.split("?")[0]  # strip query params
+                    seen[clean] = href
+            # Take the most-specific (longest) unique product URL
+            if seen:
+                best = max(seen.keys(), key=len)
+                href = seen[best]
                 product_link = href if href.startswith("http") else TSC_BASE + href
-                break
 
-        # Step 2: Fetch actual product page and get its og:image
+        # Step 2: Fetch product page og:image
         if product_link:
             print(f"[ImageFetch] Following product link: {product_link}")
             prod_resp = requests.get(product_link, headers=HEADERS, timeout=6)
@@ -140,15 +156,7 @@ def _search_page_image(topic: str) -> str | None:
                         print(f"[ImageFetch] Product page og:image: {url}")
                         return url
 
-                # Fallback: first valid img on the product page
-                for img in prod_soup.find_all("img"):
-                    src = img.get("src") or img.get("data-src") or ""
-                    url = _normalise_url(src)
-                    if url and _is_product_image(url):
-                        print(f"[ImageFetch] Product page img fallback: {url}")
-                        return url
-
-        # Step 3: Fallback — scrape images directly from search results page
+        # Step 3: Fallback — search results page imgs, strict filter
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src") or ""
             url = _normalise_url(src)
@@ -221,29 +229,24 @@ def _normalise_url(src: str) -> str:
 
 
 def _is_product_image(url: str) -> bool:
-    """
-    Returns True only for real product images from Sleep Company CDN.
-    Rejects logos, icons, banners, tiny thumbnails, and unrelated assets.
-    """
     if not url:
         return False
-
     url_lower = url.lower()
 
-    # Must be from Sleep Company CDN or Shopify CDN
     if "thesleepcompany.in" not in url_lower and "cdn.shopify.com" not in url_lower:
         return False
 
-    # Must be an image file
     if not any(ext in url_lower for ext in (".jpg", ".jpeg", ".png", ".webp")):
         return False
 
-    # Reject tiny images (thumbnails, icons) via Shopify width param
+    # Reject Shopify /files/ paths — these are banners/assets, not product images
+    if "cdn.shopify.com" in url_lower and "/files/" in url_lower:
+        return False
+
     width_match = re.search(r'[?&]width=(\d+)', url)
     if width_match and int(width_match.group(1)) < 400:
         return False
 
-    # Reject generic/non-product filenames
     filename = url_lower.split("/")[-1].split("?")[0]
     skip_keywords = [
         "logo", "icon", "banner", "badge", "flag", "sprite",
@@ -254,17 +257,18 @@ def _is_product_image(url: str) -> bool:
         "app-store", "play-store", "qr", "map", "location",
         "chat", "support", "contact", "email", "phone",
         "loader", "spinner", "hero", "slide", "slider",
+        "navigation", "menu", "nav", "recommender",  # ← added
     ]
     if any(kw in filename for kw in skip_keywords):
         return False
 
-    # Accept product-related URLs
     product_hints = [
         "mattress", "pillow", "sofa", "recliner", "chair",
-        "bed", "smartgrid", "smart-grid", "product", "ortho",
-        "ergo", "feel", "luxe", "original", "elite", "pro",
+        "bed", "smartgrid", "smart-grid", "ortho", "ergo",
+        "feel", "luxe", "original", "elite", "pro",
     ]
     has_product_hint = any(hint in url_lower for hint in product_hints)
+    # Must be /products/ path specifically, not /files/
     is_shopify_product = "cdn.shopify.com" in url_lower and "/products/" in url_lower
 
     return has_product_hint or is_shopify_product
