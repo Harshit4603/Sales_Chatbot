@@ -149,13 +149,23 @@ def _search_page_image(topic: str) -> str | None:
             prod_resp = requests.get(product_link, headers=HEADERS, timeout=6)
             if prod_resp.status_code == 200:
                 prod_soup = BeautifulSoup(prod_resp.text, "html.parser")
-                og = prod_soup.find("meta", property="og:image")
+                
+                # Try og:image first (both property and name variants)
+                og = (
+                    prod_soup.find("meta", property="og:image") or
+                    prod_soup.find("meta", attrs={"name": "og:image"})
+                )
                 if og and og.get("content"):
                     url = _normalise_url(og["content"])
                     if _is_product_image(url):
-                        print(f"[ImageFetch] Product page og:image: {url}")
                         return url
-
+    
+    # Fallback: scrape img tags with data-src support
+    for img in prod_soup.find_all("img"):
+        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
+        url = _normalise_url(src)
+        if url and _is_product_image(url):
+            return url
         # Step 3: Fallback — search results page imgs, strict filter
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src") or ""
@@ -183,7 +193,6 @@ def _collection_page_image(topic: str) -> str | None:
     try:
         # Remove generic words that never appear in collection slugs
         stop_words = {
-            "mattress", "pillow", "sofa", "bed", "chair", "recliner",
             "the", "a", "an", "and", "or", "for", "with",
         }
         words = [w for w in topic.lower().split() if w not in stop_words]
