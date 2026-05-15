@@ -2,6 +2,8 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
+from groq import Groq
+import os
 
 HEADERS = {
     "User-Agent": (
@@ -13,9 +15,55 @@ HEADERS = {
 
 TSC_BASE = "https://thesleepcompany.in"
 
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+
+
+# =============================================================================
+# PRODUCT NAME EXTRACTOR
+# Pulls the most specific product name from the LLM answer for accurate image fetch.
+# =============================================================================
+
+def extract_product_name_for_image(answer: str) -> str | None:
+    """
+    Extracts the single most specific Sleep Company product name
+    from the answer text using a fast LLM call.
+    Returns None if no specific product is found.
+    """
+    if not answer or not answer.strip():
+        return None
+
+    prompt = f"""Extract the single most specific Sleep Company product name from this text.
+Return ONLY the product name (e.g. "SmartGRID Luxe mattress", "Ortho X pillow", "ErgoSmart sofa").
+If no specific product is mentioned, return null.
+Do not return generic words like "mattress" or "pillow" alone — only named products.
+
+Text: {answer[:800]}
+Product name:"""
+
+    try:
+        resp = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=20,
+        )
+        name = resp.choices[0].message.content.strip().strip('"').strip("'")
+        if not name or name.lower() in ("null", "none", "n/a", ""):
+            return None
+        print(f"[ImageFetch] Extracted product name: '{name}'")
+        return name
+    except Exception as e:
+        print(f"[ImageFetch] Product name extraction failed ({e})")
+        return None
+
+
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
+
 def fetch_product_image(topic: str) -> str | None:
     """
-    Given a product topic string (e.g. "SmartGRID mattress"),
+    Given a product topic string (e.g. "SmartGRID Luxe mattress"),
     searches thesleepcompany.in and returns the first clean product
     image URL found, or None if nothing is found.
     """
@@ -25,7 +73,7 @@ def fetch_product_image(topic: str) -> str | None:
     topic_clean = topic.strip()
     print(f"[ImageFetch] Searching for: '{topic_clean}'")
 
-    # ── Strategy 1: Search page ───────────────────────────────────────────────
+    # ── Strategy 1: Search page → product page og:image ──────────────────────
     image_url = _search_page_image(topic_clean)
     if image_url:
         return image_url
@@ -39,8 +87,29 @@ def fetch_product_image(topic: str) -> str | None:
     return None
 
 
+def fetch_product_image_from_answer(answer: str) -> str | None:
+    """
+    High-level helper used by app.py.
+    Extracts the product name from the answer, then fetches the image.
+    Falls back to None if nothing is found.
+    """
+    product_name = extract_product_name_for_image(answer)
+    if not product_name:
+        print("[ImageFetch] No product name extracted from answer — skipping image fetch")
+        return None
+    return fetch_product_image(product_name)
+
+
+# =============================================================================
+# STRATEGY 1 — Search page → follow product link → og:image
+# =============================================================================
+
 def _search_page_image(topic: str) -> str | None:
-    """Hits the site search and pulls the first product image."""
+    """
+    Hits the site search, finds the first /products/ link,
+    fetches that product page, and returns its og:image.
+    Falls back to scraping images directly from search results.
+    """
     try:
         search_url = f"{TSC_BASE}/search?q={quote_plus(topic)}&type=product"
         resp = requests.get(search_url, headers=HEADERS, timeout=6)
@@ -50,20 +119,41 @@ def _search_page_image(topic: str) -> str | None:
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Try og:image first (most reliable — it's the hero product image)
-        og = soup.find("meta", property="og:image")
-        if og and og.get("content"):
-            url = _normalise_url(og["content"])
-            if _is_product_image(url):
-                print(f"[ImageFetch] og:image hit: {url}")
-                return url
+        # Step 1: Find first product link from search results
+        product_link = None
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "/products/" in href:
+                product_link = href if href.startswith("http") else TSC_BASE + href
+                break
 
-        # Try first product card image
+        # Step 2: Fetch actual product page and get its og:image
+        if product_link:
+            print(f"[ImageFetch] Following product link: {product_link}")
+            prod_resp = requests.get(product_link, headers=HEADERS, timeout=6)
+            if prod_resp.status_code == 200:
+                prod_soup = BeautifulSoup(prod_resp.text, "html.parser")
+                og = prod_soup.find("meta", property="og:image")
+                if og and og.get("content"):
+                    url = _normalise_url(og["content"])
+                    if _is_product_image(url):
+                        print(f"[ImageFetch] Product page og:image: {url}")
+                        return url
+
+                # Fallback: first valid img on the product page
+                for img in prod_soup.find_all("img"):
+                    src = img.get("src") or img.get("data-src") or ""
+                    url = _normalise_url(src)
+                    if url and _is_product_image(url):
+                        print(f"[ImageFetch] Product page img fallback: {url}")
+                        return url
+
+        # Step 3: Fallback — scrape images directly from search results page
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src") or ""
             url = _normalise_url(src)
             if url and _is_product_image(url):
-                print(f"[ImageFetch] Product card image: {url}")
+                print(f"[ImageFetch] Search result img fallback: {url}")
                 return url
 
     except Exception as e:
@@ -72,14 +162,30 @@ def _search_page_image(topic: str) -> str | None:
     return None
 
 
+# =============================================================================
+# STRATEGY 2 — Collection/category page
+# =============================================================================
+
 def _collection_page_image(topic: str) -> str | None:
     """
     Guesses a collection slug from the topic and fetches the page.
-    e.g. "SmartGRID Luxe mattress" → /collections/smartgrid-luxe-mattress
+    Strips generic stop words so the slug matches real collection URLs.
+    e.g. "SmartGRID Luxe mattress" → /collections/smartgrid-luxe
     """
     try:
-        slug = re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")
+        # Remove generic words that never appear in collection slugs
+        stop_words = {
+            "mattress", "pillow", "sofa", "bed", "chair", "recliner",
+            "the", "a", "an", "and", "or", "for", "with",
+        }
+        words = [w for w in topic.lower().split() if w not in stop_words]
+        if not words:
+            return None
+
+        slug = re.sub(r"[^a-z0-9]+", "-", " ".join(words)).strip("-")
         collection_url = f"{TSC_BASE}/collections/{slug}"
+        print(f"[ImageFetch] Trying collection URL: {collection_url}")
+
         resp = requests.get(collection_url, headers=HEADERS, timeout=6)
         if resp.status_code != 200:
             return None
@@ -98,6 +204,10 @@ def _collection_page_image(topic: str) -> str | None:
     return None
 
 
+# =============================================================================
+# HELPERS
+# =============================================================================
+
 def _normalise_url(src: str) -> str:
     """Ensures the URL is absolute and uses HTTPS."""
     if not src:
@@ -111,11 +221,16 @@ def _normalise_url(src: str) -> str:
 
 
 def _is_product_image(url: str) -> bool:
+    """
+    Returns True only for real product images from Sleep Company CDN.
+    Rejects logos, icons, banners, tiny thumbnails, and unrelated assets.
+    """
     if not url:
         return False
+
     url_lower = url.lower()
 
-    # Must be from Sleep Company CDN
+    # Must be from Sleep Company CDN or Shopify CDN
     if "thesleepcompany.in" not in url_lower and "cdn.shopify.com" not in url_lower:
         return False
 
@@ -124,8 +239,7 @@ def _is_product_image(url: str) -> bool:
         return False
 
     # Reject tiny images (thumbnails, icons) via Shopify width param
-    import re as _re
-    width_match = _re.search(r'[?&]width=(\d+)', url)
+    width_match = re.search(r'[?&]width=(\d+)', url)
     if width_match and int(width_match.group(1)) < 400:
         return False
 
@@ -144,7 +258,7 @@ def _is_product_image(url: str) -> bool:
     if any(kw in filename for kw in skip_keywords):
         return False
 
-    # Accept only product-related URLs
+    # Accept product-related URLs
     product_hints = [
         "mattress", "pillow", "sofa", "recliner", "chair",
         "bed", "smartgrid", "smart-grid", "product", "ortho",
