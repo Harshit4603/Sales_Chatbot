@@ -113,11 +113,7 @@ def _search_page_image(topic: str) -> str | None:
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Step 1: Find product link from search RESULTS only
-        # Look inside result containers, not nav/header
         product_link = None
-        
-        # Try common search result container selectors first
         result_containers = (
             soup.select(".product-item a[href*='/products/']") or
             soup.select(".search-result a[href*='/products/']") or
@@ -125,19 +121,17 @@ def _search_page_image(topic: str) -> str | None:
             soup.select("li a[href*='/products/']") or
             soup.select("article a[href*='/products/']")
         )
-        
+
         if result_containers:
             href = result_containers[0].get("href", "")
             product_link = href if href.startswith("http") else TSC_BASE + href
         else:
-            # Fallback: find ALL /products/ links, skip nav duplicates
             seen = {}
             for a in soup.find_all("a", href=True):
                 href = a["href"]
                 if "/products/" in href:
-                    clean = href.split("?")[0]  # strip query params
+                    clean = href.split("?")[0]
                     seen[clean] = href
-            # Take the most-specific (longest) unique product URL
             if seen:
                 best = max(seen.keys(), key=len)
                 href = seen[best]
@@ -149,8 +143,8 @@ def _search_page_image(topic: str) -> str | None:
             prod_resp = requests.get(product_link, headers=HEADERS, timeout=6)
             if prod_resp.status_code == 200:
                 prod_soup = BeautifulSoup(prod_resp.text, "html.parser")
-                
-                # Try og:image first (both property and name variants)
+
+                # Try og:image (both property and name variants)
                 og = (
                     prod_soup.find("meta", property="og:image") or
                     prod_soup.find("meta", attrs={"name": "og:image"})
@@ -158,15 +152,18 @@ def _search_page_image(topic: str) -> str | None:
                 if og and og.get("content"):
                     url = _normalise_url(og["content"])
                     if _is_product_image(url):
+                        print(f"[ImageFetch] Product page og:image: {url}")
                         return url
-    
-    # Fallback: scrape img tags with data-src support
-    for img in prod_soup.find_all("img"):
-        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
-        url = _normalise_url(src)
-        if url and _is_product_image(url):
-            return url
-        # Step 3: Fallback — search results page imgs, strict filter
+
+                # Fallback: scrape img tags with data-src support  ← NOW INSIDE try
+                for img in prod_soup.find_all("img"):
+                    src = img.get("src") or img.get("data-src") or img.get("data-lazy-src") or ""
+                    url = _normalise_url(src)
+                    if url and _is_product_image(url):
+                        print(f"[ImageFetch] Product page img fallback: {url}")
+                        return url
+
+        # Step 3: Search results page imgs  ← NOW INSIDE try
         for img in soup.find_all("img"):
             src = img.get("src") or img.get("data-src") or ""
             url = _normalise_url(src)
