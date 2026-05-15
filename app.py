@@ -349,8 +349,8 @@ User query: {user_query}"""
             "query_type":     query_type,
             "doc_category":   doc_category,
             "topic":          topic,
-            "needs_live":     True,
-            "needs_internal": True,
+            "needs_live":     needs_live,
+            "needs_internal": needs_internal,
             "query_parts":    parsed.get("query_parts", []),
             "is_multi_part":  bool(parsed.get("is_multi_part", False)),
         }
@@ -1290,8 +1290,8 @@ async def parallel_retrieve_and_answer_async(
             parsed["needs_live"] = True
             parsed["doc_category"] = "sales_assist"
                 # ← ADD THESE TWO LINES HERE
-        doc_category = parsed["doc_category"]
-        needs_live   = parsed["needs_live"]
+            doc_category = parsed["doc_category"]
+            needs_live   = parsed["needs_live"]
     else:
         db_chunks  = []
         db_context = ""
@@ -1620,32 +1620,25 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     answer, sources = process_query(request.query, memory_block, role=request.role)
     if not answer or not answer.strip():
         answer = "I wasn't able to find information on that right now. Please try rephrasing or check with your manager."
-        
-    # 4. Track route + metadata — ONE parse call, reuse everywhere
-    parsed_for_stats = parse_query(request.query)
-    increment_route_counter(parsed_for_stats.get("doc_category", "internal"), db)
 
-    _cat           = parsed_for_stats.get("doc_category", "internal")
-    _used_internet = _cat in ("live", "sales_assist")
-    topic          = parsed_for_stats.get("topic", "")
-    query_type     = parsed_for_stats.get("query_type", "")
+    # 4. Parse once — reuse for stats, image fetch, and internet flag
+    parsed = parse_query(request.query)
+    doc_category = parsed.get("doc_category", "internal")
+    query_type   = parsed.get("query_type", "")
+    topic        = parsed.get("topic", "")
 
+    increment_route_counter(doc_category, db)
+    _used_internet = doc_category in ("live", "sales_assist")
+
+    # 5. Product image (single fetch, guarded)
     product_image = None
     if query_type == "retrieval" and topic:
         try:
             product_image = fetch_product_image_from_answer(answer)
         except Exception as e:
             print(f"[Chat] Image fetch failed: {e}")
-    parsed_meta   = parse_query(request.query)
-    topic         = parsed_meta.get("topic", "")
-    query_type    = parsed_meta.get("query_type", "")
-    
-    if query_type == "retrieval" and topic:
-        try:
-            product_image = fetch_product_image_from_answer(answer)
-        except Exception as e:
-            print(f"[Stream] Image fetch failed: {e}")
-    
+
+    # 6. Persist message
     message = ChatMessage(
         session_id    = session.session_id,
         employee_id   = request.employee_id,
@@ -1658,20 +1651,21 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(message)
 
-    # 5. Follow-up suggestions (skip for conversational)
+    # 7. Follow-up suggestions (skip for conversational / no sources)
     followups = []
     if sources["db_sources"] or sources["web_sources"]:
         followups = generate_followups(request.query, answer)
 
     return {
-        "session_id"  : str(session.session_id),
-        "message_id"  : str(message.message_id),
-        "answer"      : answer,
-        "db_sources"  : sources["db_sources"],
-        "web_sources" : sources["web_sources"],
-        "followups"   : followups,
+        "session_id"   : str(session.session_id),
+        "message_id"   : str(message.message_id),
+        "answer"       : answer,
+        "db_sources"   : sources["db_sources"],
+        "web_sources"  : sources["web_sources"],
+        "followups"    : followups,
         "product_image": product_image,
     }
+    
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)):
     session = None
