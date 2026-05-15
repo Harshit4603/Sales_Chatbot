@@ -1012,6 +1012,7 @@ def format_final_answer(raw_answer: str, user_query: str,
                         original_language: str = "english",
                         doc_category: str = "internal") -> str:
 
+    # Strip echoed question if Groq repeated it
     if raw_answer.lower().startswith(user_query[:30].lower()):
         raw_answer = raw_answer[len(user_query):].strip()
 
@@ -1020,13 +1021,95 @@ def format_final_answer(raw_answer: str, user_query: str,
         return "I wasn't able to generate a response. Please try again."
 
     if original_language == "english":
-        prompt = f"""..."""  # your existing English prompt
+        prompt = f"""You are a response formatter for The Sleep Company's internal sales assistant.
+
+User asked: "{user_query}"
+
+Raw answer:
+---
+{raw_answer}
+---
+
+REORDERING LOGIC (apply this first, before any formatting):
+- Read the full raw answer and identify the MOST SPECIFIC, DIRECT answer to the query
+- That specific answer (exact spec, price, step, name, feature) goes FIRST as the opening line
+- Then follow with supporting detail that explains WHY or HOW
+- Then end with the broadest context (category, use-case, positioning)
+- Think: Answer → Evidence → Context (never Context → Evidence → Answer)
+
+Example of WRONG order (broad to specific):
+"The Sleep Company offers a range of mattresses. SmartGRID is a key technology. The Ortho X uses SmartGRID and costs ₹25,000."
+
+Example of RIGHT order (specific to broad):
+"The **Ortho X** is priced at ₹25,000 and runs on **SmartGRID** technology — here's why that matters for your customer."
+
+FORMATTING RULES:
+- Opening line: one sharp, complete sentence stating the direct answer — no bullet, no bold header
+- Following bullets: specific facts first (numbers, names, dimensions, steps), then benefits, then positioning
+- Each bullet = one complete insight, 15-25 words, subject + verb + object always present
+- **Bold** only product names and standout differentiators — never bold every line
+- Fix ALL grammar — missing articles, fragments, run-ons, tense errors, misplaced prepositions
+- Warm, collegial tone — senior colleague giving inside knowledge, not a manual being recited
+- Never add new information — only restructure, fix grammar, and format
+- Use markdown table when comparing specs or products side by side
+- End with "Want me to go deeper on any part of this?" only if answer exceeds 8 bullets
+
+OUTPUT: Only the reordered, polished answer. No preamble, no explanation."""
 
     else:
-        language_guide = { ... }.get(original_language, "Hinglish Roman script by default")
-        prompt = f"""..."""  # your existing non-English prompt
+        language_guide = {
+            "hinglish":  "Hindi+English Roman: 'SmartGRID ek patented tech hai, extra comfort milta hai'",
+            "hindi":     "Hindi+English Roman: 'SmartGRID ek patented tech hai, extra comfort milta hai'",
+            "marathi":   "Marathi+English Roman: 'SmartGRID ek patented tech aahe, extra comfort milto'",
+            "tamil":     "Tamil+English Roman: 'SmartGRID oru patented tech, extra comfort kudukum'",
+            "telugu":    "Telugu+English Roman: 'SmartGRID oka patented tech, extra comfort istundi'",
+            "kannada":   "Kannada+English Roman: 'SmartGRID ondu patented tech, extra comfort kottide'",
+            "malayalam": "Malayalam+English Roman: 'SmartGRID oru patented tech aanu, extra comfort kittum'",
+            "gujarati":  "Gujarati+English Roman: 'SmartGRID ek patented tech chhe, extra comfort male chhe'",
+            "bengali":   "Bengali+English Roman: 'SmartGRID ekta patented tech, extra comfort pawa jay'",
+            "punjabi":   "Punjabi+English Roman: 'SmartGRID ik patented tech hai, extra comfort mildi hai'",
+            "odia":      "Odia+English Roman: 'SmartGRID gote patented tech, extra comfort mile'",
+            "assamese":  "Assamese+English Roman: 'SmartGRID এক patented tech, extra comfort powa jay'",
+            "bhojpuri":  "Bhojpuri+English Roman: 'SmartGRID ek patented tech hau, extra comfort milela'",
+        }.get(original_language, "Hinglish Roman script by default")
 
-    # ── THIS BLOCK MUST BE INSIDE THE FUNCTION ────────────────────────────
+        prompt = f"""You are rewriting a response for The Sleep Company's internal sales assistant.
+The user wrote in {original_language}. Match their language and tone exactly.
+
+User asked: "{user_query}"
+Language style: {language_guide}
+
+Raw answer:
+---
+{raw_answer}
+---
+
+REORDERING LOGIC (apply this first, before translating):
+- Find the MOST SPECIFIC answer in the raw text — exact price, spec, step, feature name
+- That goes FIRST as the opening line in {original_language}
+- Then supporting detail (why/how) in the middle
+- Broadest context (category, positioning) comes LAST
+- Order: Direct answer → Evidence → Context (never the reverse)
+
+Example structure in Hinglish:
+Opening: "**Ortho X** ki price ₹25,000 hai aur isme **SmartGRID** technology hai."
+Middle bullets: specific features, dimensions, what the customer feels
+Last bullet: broad positioning — "Yeh mattress back pain ke liye best choice hai overall."
+
+FORMATTING RULES:
+- Opening line: one sharp sentence in {original_language} — the direct answer, no bullet
+- Bullets after: specific → supporting → broad (bottom-up order strictly)
+- Product names, prices, dimensions, technical terms → always in English
+- Rewrite every bullet in {original_language} mixed with English (Roman script ONLY — never native script)
+- Fix grammar in both languages — fluent, natural phrasing throughout
+- **Bold** only product names — never bold every line
+- 10-20 words per bullet, 12 bullets max
+- Match the user's tone exactly — casual query = casual collegial reply
+- Never add new information — only reorder, translate, and fix grammar
+- End with a natural closing line in {original_language} that moves toward the sale
+
+OUTPUT: Only the rewritten answer. No thinking, no explanation, no preamble."""
+
     for attempt in range(5):
         try:
             resp = groq_client.chat.completions.create(
@@ -1049,6 +1132,7 @@ def format_final_answer(raw_answer: str, user_query: str,
     try:
         raw_result = resp.choices[0].message.content.strip() if resp.choices else raw_answer
 
+        # Strip <think> blocks — handle closed, unclosed, and missing closing tags
         result = re.sub(r'<think>.*?</think>', '', raw_result, flags=re.DOTALL).strip()
         if '<think>' in result:
             result = result[result.rfind('<think>'):].replace('<think>', '').strip()
@@ -1057,12 +1141,12 @@ def format_final_answer(raw_answer: str, user_query: str,
 
         result = result or raw_answer
 
+        # Language check — if non-English and Qwen returned English anyway, fallback
         if original_language not in ("english",):
             hindi_markers = ["hai", "ka", "ki", "ke", "kya", "aur", "nahi", "se", "mein", "ho",
                              "aahe", "milto", "kudukum", "istundi", "kottide", "kittum",
                              "chhe", "jay", "mildi", "mile", "powa", "hau"]
-            has_target_lang = any(w in result.lower() for w in hindi_markers)
-            if not has_target_lang:
+            if not any(w in result.lower() for w in hindi_markers):
                 print(f"[Formatter] Language check failed — returning raw answer")
                 return raw_answer
 
@@ -1520,18 +1604,24 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
 
     # 3. Run pipeline
     answer, sources = process_query(request.query, memory_block, role=request.role)
-    
-    # 4. Track route
+    if not answer or not answer.strip():
+        answer = "I wasn't able to find information on that right now. Please try rephrasing or check with your manager."
+        
+    # 4. Track route + metadata — ONE parse call, reuse everywhere
     parsed_for_stats = parse_query(request.query)
     increment_route_counter(parsed_for_stats.get("doc_category", "internal"), db)
 
-    # 4. Log to DB
     _cat           = parsed_for_stats.get("doc_category", "internal")
     _used_internet = _cat in ("live", "sales_assist")
     topic          = parsed_for_stats.get("topic", "")
     query_type     = parsed_for_stats.get("query_type", "")
 
     product_image = None
+    if query_type == "retrieval" and topic:
+        try:
+            product_image = fetch_product_image(topic)
+        except Exception as e:
+            print(f"[Chat] Image fetch failed: {e}")
     parsed_meta   = parse_query(request.query)
     topic         = parsed_meta.get("topic", "")
     query_type    = parsed_meta.get("query_type", "")
