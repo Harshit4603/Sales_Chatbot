@@ -259,37 +259,52 @@ Examples: "asdfgh", "123abc!!!", "blue the if running potato"
 
 CONVERSATIONAL HANDLER:
 Receives: Pure greetings, small talk, thanks, bye — no information needed
-System: Responds warmly, no data retrieval happens at all
 Examples: "Hi!", "Good morning", "Thanks", "You're helpful", "Bye"
 → Set conversation_type=chit_chat
 
-- work_query: 
-- Product specs: dimensions, materials, technology, warranty, care instructions
-- Product catalog: series, variants, configurations, feature hierarchies
-- SOPs: return process, escalation paths, complaint handling, replacement policy
-- HR & ops: leave policy, attendance rules, conduct guidelines, onboarding, training material
-- Use-case recommendations: "Which mattress for back pain?" → answer using approved internal product mappings
-- Technical explanations: "What is SmartGRID?", "How does the Enkash works?"
-- Staff guidance: quick scripts, objection handlers based on approved product strengths
+WORK QUERY — classify as product OR process:
 
-STEP 2 — DECOMPOSE work_query into sub-questions:
+PRODUCT (always needs website + internal docs):
+- Any mention of a product name, category, or material (mattress, sofa, pillow, bed, recliner, foam, fabric)
+- Specs, dimensions, weight, layers, firmness, technology (SmartGRID, ErgoSense, etc.)
+- Pricing, discounts, offers, EMI, warranty, trial period
+- Colors, variants, sizes, configurations, availability
+- Comparisons — with competitors OR between our own products
+- Recommendations — "which mattress for back pain?", "best pillow for side sleepers"
+- Care instructions, usage, cleaning, maintenance of any product
+- Customer objections or scripts related to a product
+- Anything a customer might ask about — even vaguely product-adjacent
+- Technical explanations of product features: "What is SmartGRID?", "How does zoning work?"
+- Accessories, add-ons, bundles, complementary products
+
+PROCESS (internal docs only — no website needed):
+- Leave policy, attendance, payroll, salary, reimbursements
+- Onboarding, training schedules, induction
+- HR policies, conduct guidelines, disciplinary procedures
+- Internal portals: EnKash, HRMS, expense tools, internal dashboards
+- Return/replacement SOPs, escalation paths, complaint workflows
+- Internal processes: how to raise a ticket, how to log attendance
+- Manager approvals, shift timings, team hierarchy
+
+WHEN IN DOUBT RELATED TO QUERY → CHECK BOTH. The website is always safer to check.
+
+STEP 2 — DECOMPOSE into sub-questions:
 For each sub-question tag as:
-- "product": specs, features, pricing, comparisons, recommendations
-- "process": steps, SOPs, policies, return, onboarding, leave
+- "product": anything product, customer, or sales related
+- "process": strictly internal HR, portal, or SOP related
 
 STEP 3 — SET FLAGS:
-- needs_internal_docs: true for all work_query
-- needs_live_data: true if ANY sub-question is of type "product" (specs, pricing, 
-  comparisons, recommendations, features, colors, variants, availability)
-- needs_live_data: false only if ALL sub-questions are of type "process" 
-  (SOPs, HR policy, onboarding, leave, attendance)
+- needs_internal_docs: true for ALL work queries
+- needs_live_data: true if ANY sub-question is "product" type
+- needs_live_data: false ONLY if every single sub-question is "process" type
+  AND the query contains zero mention of any physical product, material, or customer-facing topic
 
-Return ONLY this JSON:
+Return ONLY this JSON (no explanation, no markdown):
 {{
   "gibberish": true | false,
   "conversation_type": "chit_chat" | "work_query",
   "needs_internal_docs": true | false,
-  "needs_live_data": false,
+  "needs_live_data": true | false,
   "query_parts": [
     {{"question": "<sub-question>", "type": "product" | "process"}}
   ],
@@ -298,13 +313,14 @@ Return ONLY this JSON:
 }}
 
 User query: {user_query}"""
+
     try:
         resp = groq_client.chat.completions.create(
-    model="qwen/qwen3-32b",
-    messages=[{"role": "user", "content": prompt}],
-    temperature=0,
-    max_tokens=800,
-)
+            model="qwen/qwen3-32b",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=800,
+        )
         raw = resp.choices[0].message.content.strip()
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
         raw = raw.replace("```json", "").replace("```", "").strip()
@@ -323,7 +339,7 @@ User query: {user_query}"""
         if conv_type not in {"chit_chat", "work_query"}:
             conv_type = "work_query"
 
-        # ── Routing logic ─────────────────────────────────────────────────────
+        # ── Routing logic ──────────────────────────────────────────────────────
         if gibberish:
             query_type, doc_category = "gibberish", "none"
 
@@ -332,24 +348,28 @@ User query: {user_query}"""
 
         else:  # work_query
             query_type = "retrieval"
-            
-            # Force live=True for any product-type sub-questions
+
+            # Safety net — if ANY sub-question is product type, force live=True
+            # This catches cases where the LLM sets needs_live_data=false incorrectly
             has_product_part = any(
                 p.get("type") == "product"
                 for p in parsed.get("query_parts", [])
             )
             if has_product_part:
                 needs_live = True
-        
-            if needs_live and needs_internal:
-                doc_category = "sales_assist"
-            elif needs_live:
-                doc_category = "sales_assist"   # always pair web with internal for product
-            elif needs_internal:
+
+            # Pure process queries — all parts must be "process" to stay internal
+            all_process = all(
+                p.get("type") == "process"
+                for p in parsed.get("query_parts", [])
+            ) if parsed.get("query_parts") else False
+
+            if all_process and not needs_live:
                 doc_category = "internal"
             else:
-                doc_category = "sales_assist"
-                needs_live = True
+                # Everything else — product, mixed, or ambiguous — hits the website
+                doc_category   = "sales_assist"
+                needs_live     = True
                 needs_internal = True
 
         print(f"[Parser] gibberish={gibberish} | conv={conv_type} | "
@@ -365,17 +385,17 @@ User query: {user_query}"""
             "query_parts":    parsed.get("query_parts", []),
             "is_multi_part":  bool(parsed.get("is_multi_part", False)),
         }
-           
+
     except Exception as e:
-        print(f"[Parser] Failed ({e}) — defaulting to retrieval/internal")
+        print(f"[Parser] Failed ({e}) — defaulting to sales_assist")
+        # Fail towards website, not away from it
         return {
             "query_type":     "retrieval",
-            "doc_category":   "internal",
+            "doc_category":   "sales_assist",
             "topic":          "",
-            "needs_live":     False,
+            "needs_live":     True,
             "needs_internal": True,
         }
-
 
 # =============================================================================
 # STEP 2 — QUERY REWRITER
