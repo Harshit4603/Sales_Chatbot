@@ -279,7 +279,10 @@ For each sub-question tag as:
 
 STEP 3 — SET FLAGS:
 - needs_internal_docs: true for all work_query
-- needs_live_data: always false
+- needs_live_data: true if ANY sub-question is of type "product" (specs, pricing, 
+  comparisons, recommendations, features, colors, variants, availability)
+- needs_live_data: false only if ALL sub-questions are of type "process" 
+  (SOPs, HR policy, onboarding, leave, attendance)
 
 Return ONLY this JSON:
 {{
@@ -329,15 +332,23 @@ User query: {user_query}"""
 
         else:  # work_query
             query_type = "retrieval"
+            
+            # Force live=True for any product-type sub-questions
+            has_product_part = any(
+                p.get("type") == "product"
+                for p in parsed.get("query_parts", [])
+            )
+            if has_product_part:
+                needs_live = True
+        
             if needs_live and needs_internal:
                 doc_category = "sales_assist"
             elif needs_live:
-                doc_category = "live"
+                doc_category = "sales_assist"   # always pair web with internal for product
             elif needs_internal:
                 doc_category = "internal"
             else:
-                # Both false — LLM unsure, run everything
-                doc_category = "internal"
+                doc_category = "sales_assist"
                 needs_live = True
                 needs_internal = True
 
