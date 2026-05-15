@@ -1073,6 +1073,80 @@ def format_final_answer(raw_answer: str, user_query: str,
         print(f"[Formatter] Result parsing failed ({e}) — returning raw answer")
         return raw_answer or "I wasn't able to generate a response. Please try again."
 
+def smart_merge(
+    user_query:        str,
+    doc_category:      str,
+    db_chunks:         list[dict],
+    db_context:        str,
+    groq_answer:       str,
+    gemini_result:     dict,
+    original_language: str = "english",
+    original_query:    str = "",
+) -> tuple[str, dict]:
+
+    gemini_answer = gemini_result.get("answer", "")
+    web_sources   = gemini_result.get("web_sources", [])
+    db_sources    = [c.get("text", "") for c in db_chunks]
+
+    PRICE_DISCLAIMER = (
+        "\n\n⚠️ *Prices are subject to change. Always confirm on "
+        "[thesleepcompany.in](https://thesleepcompany.in) "
+        "or with your manager before quoting to a customer.*"
+    )
+
+    # ── LIVE ─────────────────────────────────────────────────────────────────
+    if doc_category == "live":
+        print("[Merge] Strategy: LIVE → Tavily only")
+        final = gemini_answer + PRICE_DISCLAIMER if gemini_answer else (
+            "Please check the latest pricing and availability directly on "
+            "https://thesleepcompany.in or confirm with your manager."
+        )
+        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
+        return final, {"db_sources": [], "web_sources": web_sources}
+
+    # ── INTERNAL ─────────────────────────────────────────────────────────────
+    if doc_category == "internal":
+        print("[Merge] Strategy: INTERNAL → Groq primary")
+        print(f"[Merge] Groq answer preview: {groq_answer[:200] if groq_answer else 'EMPTY'}")
+        final = groq_answer or "I don't have enough details on this in our internal docs right now."
+        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
+        return final, {"db_sources": db_sources, "web_sources": []}
+
+    # ── SALES ASSIST ─────────────────────────────────────────────────────────
+    if doc_category == "sales_assist":
+        print("[Merge] Strategy: SALES ASSIST → Tavily primary, DB supplements")
+        if gemini_answer and groq_answer:
+            final = f"{gemini_answer}\n\n**From internal docs:**\n{groq_answer}"
+        elif gemini_answer:
+            final = gemini_answer
+        elif groq_answer:
+            final = groq_answer
+        else:
+            final = (
+                "I couldn't retrieve enough information right now. "
+                "Please visit https://thesleepcompany.in or contact your manager."
+            )
+        final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
+        return final, {"db_sources": db_sources, "web_sources": web_sources}
+
+    # ── GENERAL FALLBACK ─────────────────────────────────────────────────────
+    print("[Merge] Strategy: FALLBACK → Tavily primary")
+    if gemini_answer:
+        final = gemini_answer
+    else:
+        retry = search_with_tavily(user_query, db_context="")
+        final = retry.get("answer") or (
+            "I couldn't retrieve that right now. Please visit https://thesleepcompany.in"
+        )
+        web_sources = retry.get("web_sources", web_sources)
+
+    # ── Final safety net — never return empty ────────────────────────────────
+    if not final or not final.strip():
+        final = "I wasn't able to find information on that. Please visit https://thesleepcompany.in or check with your manager."
+
+    final = format_final_answer(final, original_query or user_query, original_language, doc_category=doc_category)
+    return final, {"db_sources": db_sources, "web_sources": web_sources}
+
 # =============================================================================
 # STEP 12 — PARALLEL RETRIEVE AND ANSWER
 #
