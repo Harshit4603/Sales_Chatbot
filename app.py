@@ -1366,7 +1366,7 @@ async def parallel_retrieve_and_answer_async(
 
     # Gemini — only if live needed
     if needs_live:
-        gemini_task = fetch_tavily_async(user_query, db_context)
+        gemini_task = fetch_tavily_async(retrieval_query, db_context)
     else:
         async def _empty_dict(): return {"answer": "", "web_sources": []}
         gemini_task = _empty_dict()
