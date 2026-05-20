@@ -42,7 +42,7 @@ load_dotenv()
 SOURCES_ACCESSED    = 10     # top_k chunks pulled from Pinecone per query
 MEMORY_TURNS        = 4      # how many past Q&A pairs to include in the LLM prompt
 DB_STRONG_THRESHOLD = 4      # min strong DB chunks to consider DB context "rich"
-SCORE_THRESHOLD     = 0.75   # min Pinecone score to count a chunk as "strong"
+SCORE_THRESHOLD     = 0.50   # min Pinecone score to count a chunk as "strong"
 MAX_CONTEXT_CHARS   = 6000   # cap on DB context fed to LLM
 
 # =============================================================================
