@@ -1636,6 +1636,10 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=403, detail="Access restricted to sales representatives and admins")
     return {"employee_id": employee.employee_id, "name": employee.name, "role": employee.role}
 
+@app.post("/logout")
+def logout(db: Session = Depends(get_db)):
+    return {"message": "Logged out successfully"}
+
 
 @app.post("/chat")
 def chat(request: ChatRequest, db: Session = Depends(get_db)):
