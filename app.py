@@ -1632,7 +1632,7 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Employee not found")
     if employee.password_hash != request.password:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if employee.role not in ("sales", "admin"):
+    if employee.role not in ("rep", "admin"):
         raise HTTPException(status_code=403, detail="Access restricted to sales representatives and admins")
     return {"employee_id": employee.employee_id, "name": employee.name, "role": employee.role}
 
