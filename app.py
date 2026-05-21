@@ -1543,7 +1543,10 @@ def increment_route_counter(doc_category: str, db: Session):
 # =============================================================================
 
 @app.post("/admin/ingest")
-async def admin_ingest(file: UploadFile = File(...)):
+async def admin_ingest(file: UploadFile = File(...), employee_id: str = "", db: Session = Depends(get_db)):
+    employee = db.query(Employee).filter(Employee.employee_id == employee_id).first()
+    if not employee or employee.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
     # 1. Validate file type
     allowed = [".pdf", ".docx", ".pptx"]
     ext     = os.path.splitext(file.filename)[-1].lower()
