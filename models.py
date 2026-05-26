@@ -40,6 +40,22 @@ class ChatMessage(Base):
     used_internet = Column(String(5), nullable=True)
     is_saved    = Column(Boolean, default=False)
 
+class IngestionLog(Base):
+    __tablename__ = "ingestion_logs"
+
+    log_id        = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    filename      = Column(String(255), nullable=False)
+    file_type     = Column(String(10),  nullable=False)   # pdf / docx / pptx
+    doc_category  = Column(String(50),  nullable=True)    # product / sop / policy …
+    sections      = Column(String(20),  nullable=True)    # sections extracted
+    chunks        = Column(String(20),  nullable=True)    # vectors upserted
+    status        = Column(String(20),  nullable=False, default="success")  # success / failed
+    error_detail  = Column(Text,        nullable=True)    # error message if failed
+    uploaded_by   = Column(String(50),  nullable=True)    # employee_id of uploader
+    uploaded_at   = Column(DateTime,    default=get_ist)
+    replaced_previous = Column(Boolean, default=False)    # True if old vectors were deleted first
+
+
 class EmployeeDevice(Base):
     __tablename__ = "employee_devices"
 
