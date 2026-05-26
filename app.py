@@ -20,7 +20,7 @@ from google.genai import types
 from tavily import TavilyClient
 
 from database import get_db
-from models import ChatSession, ChatMessage, Employee, get_ist
+from models import ChatSession, ChatMessage, Employee, IngestionLog, get_ist
 from sqlalchemy import text
 from fastapi import File, UploadFile
 import tempfile
@@ -1558,12 +1558,14 @@ async def admin_ingest(file: UploadFile = File(...), employee_id: str = "", db: 
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
+    replaced_previous = False
     try:
         # 3. Delete existing vectors for this file from Pinecone
         print(f"[Ingest] Deleting existing vectors for: {file.filename}")
         try:
             index.delete(filter={"source": {"$eq": file.filename}})
             print(f"[Ingest] ✅ Old vectors deleted")
+            replaced_previous = True
         except Exception as e:
             print(f"[Ingest] No existing vectors found or delete failed: {e}")
 
@@ -1594,23 +1596,84 @@ async def admin_ingest(file: UploadFile = File(...), employee_id: str = "", db: 
         print(f"[Ingest] Uploading to Pinecone...")
         upload_to_pinecone(embeddings, metadatas)
 
+        # 6. Log successful upload to DB
+        category = metadatas[0]["doc_category"] if metadatas else "unknown"
+        log_entry = IngestionLog(
+            filename          = file.filename,
+            file_type         = ext.lstrip("."),
+            doc_category      = category,
+            sections          = str(len(sections)),
+            chunks            = str(len(texts)),
+            status            = "success",
+            uploaded_by       = employee_id,
+            replaced_previous = replaced_previous,
+        )
+        db.add(log_entry)
+        db.commit()
+
         return {
             "status":   "success",
             "file":     file.filename,
             "sections": len(sections),
             "chunks":   len(texts),
-            "category": metadatas[0]["doc_category"] if metadatas else "unknown"
+            "category": category,
         }
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"[Ingest] Error: {e}")
+        # Log failed upload to DB
+        try:
+            log_entry = IngestionLog(
+                filename          = file.filename,
+                file_type         = ext.lstrip("."),
+                doc_category      = infer_doc_category(file.filename),
+                status            = "failed",
+                error_detail      = str(e)[:500],
+                uploaded_by       = employee_id,
+                replaced_previous = replaced_previous,
+            )
+            db.add(log_entry)
+            db.commit()
+        except Exception as log_err:
+            print(f"[Ingest] Failed to write error log: {log_err}")
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
         # Always clean up temp file
         os.unlink(tmp_path)
+
+
+@app.get("/admin/files")
+def list_ingested_files(employee_id: str = "", db: Session = Depends(get_db)):
+    """Return all file upload records, newest first. Admin only."""
+    employee = db.query(Employee).filter(Employee.employee_id == employee_id).first()
+    if not employee or employee.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    logs = (
+        db.query(IngestionLog)
+        .order_by(IngestionLog.uploaded_at.desc())
+        .all()
+    )
+
+    return [
+        {
+            "log_id":           str(log.log_id),
+            "filename":         log.filename,
+            "file_type":        log.file_type,
+            "doc_category":     log.doc_category,
+            "sections":         log.sections,
+            "chunks":           log.chunks,
+            "status":           log.status,
+            "error_detail":     log.error_detail,
+            "uploaded_by":      log.uploaded_by,
+            "uploaded_at":      log.uploaded_at.isoformat() if log.uploaded_at else None,
+            "replaced_previous": log.replaced_previous,
+        }
+        for log in logs
+    ]
 
 @app.get("/")
 def root():
