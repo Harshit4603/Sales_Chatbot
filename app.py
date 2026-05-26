@@ -18,6 +18,7 @@ from pinecone import Pinecone
 import google.genai as genai
 from google.genai import types
 from tavily import TavilyClient
+from fastapi import Form
 
 from database import get_db
 from models import ChatSession, ChatMessage, Employee, IngestionLog, get_ist
@@ -1543,7 +1544,7 @@ def increment_route_counter(doc_category: str, db: Session):
 # =============================================================================
 
 @app.post("/admin/ingest")
-async def admin_ingest(file: UploadFile = File(...), employee_id: str = "", db: Session = Depends(get_db)):
+async def admin_ingest(file: UploadFile = File(...), employee_id: str = Form(...), db: Session = Depends(get_db)):
     employee = db.query(Employee).filter(Employee.employee_id == employee_id).first()
     if not employee or employee.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
